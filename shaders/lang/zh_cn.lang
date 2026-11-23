@@ -1,0 +1,15 @@
+screen.PATH_TRACING=路径追踪
+screen.DEBUG=调试视图
+option.DIFFUSE_SSRT=漫反射屏幕空间拦截 (SSRT)
+option.SPECULAR_SSR=镜面屏幕空间反射 (SSR)
+option.PATH_GUIDING=L1 球谐路径引导 (vMF)
+option.SPECULAR_REFLECTIONS=镜面反射
+option.EXPOSURE=曝光倍率
+option.TAA_ENABLED=时间抗锯齿 (TAA)
+option.DEBUG_VIEW=调试视图
+value.DEBUG_VIEW.0=关闭
+value.DEBUG_VIEW.1=原始漫反射 GI
+value.DEBUG_VIEW.2=降噪后漫反射 GI
+value.DEBUG_VIEW.3=镜面反射
+value.DEBUG_VIEW.4=L1 SH 辐射度缓存
+value.DEBUG_VIEW.5=体素双轨覆盖 (绿=六面快轨 红=非立方图元)
