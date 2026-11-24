@@ -1,12 +1,13 @@
 #version 430 compatibility
 
-// Pass: Spatial 3x3 Variance Estimation + RCRS Clamp + Perceptual Tonemap
-// Inspired by Revoxelation (VarianceEstimate) & iterationRP (DiffuseVarianceEstimation).
+// Pass: Diffuse SVGF Temporal Accumulation (Ping-Pong Race-Free + 3x3 RCRS Despike + Variance-Aware Response)
 #include "/lib/SVGF.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 const vec2 workGroupsRender = vec2(1.0, 1.0);
 
+layout(rgba16f) uniform writeonly image2D diffHistImg;
+layout(rg32f)   uniform writeonly image2D diffMomImg;
 layout(rgba16f) uniform writeonly image2D scratchImg;
 
 void main() {
@@ -14,65 +15,127 @@ void main() {
     ivec2 res = ivec2(screenSize());
     if (any(greaterThanEqual(px, res))) return;
 
-    ivec2 dstPx = px + ivec2(res.x, 0);
+    int currSide = frameCounter & 1;
+    int prevSide = currSide ^ 1;
+    ivec2 prevSlowOff = ivec2((prevSide * 2) * res.x, 0);
+    ivec2 prevFastOff = ivec2((prevSide * 2 + 1) * res.x, 0);
+    ivec2 currSlowOff = ivec2((currSide * 2) * res.x, 0);
+    ivec2 currFastOff = ivec2((currSide * 2 + 1) * res.x, 0);
+    ivec2 prevMomOff  = ivec2(prevSide * res.x, 0);
+    ivec2 currMomOff  = ivec2(currSide * res.x, 0);
+
     float depth = texelFetch(depthtex1, px, 0).r;
     if (depth >= 0.999999) {
-        imageStore(scratchImg, dstPx, vec4(0.0));
+        imageStore(scratchImg, px, vec4(0.0));
+        imageStore(diffHistImg, px + currSlowOff, vec4(0.0));
+        imageStore(diffHistImg, px + currFastOff, vec4(0.0));
+        imageStore(diffMomImg,  px + currMomOff,  vec4(0.0));
         return;
     }
 
-    vec4 centerData = texelFetch(scratchTex, px, 0);
-    vec3 rad = max(centerData.rgb, vec3(0.0));
-    float age = max(centerData.a, 1.0);
+    float rough;
+    bool isHand;
+    readGBufferRoughHand(px, rough, isHand);
+    vec3 geoNormal, shadeNormal;
+    readGBufferNormals(px, geoNormal, shadeNormal);
 
-    uint g1 = texelFetch(colortex2, px, 0).r;
-    vec3 centerGeoN = unpackNormal16(g1 & 65535u);
+    vec2 uv = (vec2(px) + 0.5) * texelSize();
+    vec3 viewPos  = screenToView(vec3(uv, depth));
+    vec3 worldPos = viewToWorld(viewPos);
+    float expectedPrevDepth = -(gbufferPreviousModelView * vec4(worldPos + cameraVelocity, 1.0)).z;
 
-    // Leave-One-Out geometry-aware 3x3 (stride 2) spatial moment estimation:
-    // Excluding center (0,0) lets RCRS cleanly catch isolated firefly spikes BEFORE the
-    // +-48px 1D spatial filter can smear them into glowing light blotches, while keeping
-    // smooth real light gradients completely untouched!
-    vec2 moments = vec2(0.0);
-    float wSum = 0.0;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            if (x == 0 && y == 0) continue;
-            ivec2 q = clamp(px + ivec2(x, y) * 2, ivec2(0), res - 1);
-            float qd = texelFetch(depthtex1, q, 0).r;
-            if (qd >= 0.999999) continue;
-            uint qg1 = texelFetch(colortex2, q, 0).r;
-            vec3 qGeoN = unpackNormal16(qg1 & 65535u);
-            if (dot(centerGeoN, qGeoN) < 0.85) continue;
+    vec3 raw = max(texelFetch(colortex3, px, 0).rgb, vec3(0.0));
+    if (any(isnan(raw)) || any(isinf(raw))) raw = vec3(0.0);
+    // Preserve distant small-emitter hits while suppressing extreme multi-light fireflies.
+    vec3 curr = despike3x3(colortex3, px, res, raw, geoNormal, shadeNormal, depth, 6.0, 0.8);
+    float currLuma = luma(curr);
 
-            float ql = luma(max(texelFetch(scratchTex, q, 0).rgb, vec3(0.0)));
-            moments += vec2(ql, ql * ql);
-            wSum += 1.0;
+    // Bilinear geometric reprojection against prevGuideTex (exact integer normal decode).
+    vec3 oldSlow = vec3(0.0);
+    vec4 oldFast = vec4(0.0);
+    vec2 oldMom  = vec2(0.0);
+    float oldAge = 0.0;
+    float support = 0.0;
+
+    if (frameCounter > 1 && !isHand) {
+        vec2 prevUV = reprojectScreenUV(uv, worldPos);
+        if (all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThan(prevUV, vec2(1.0)))) {
+            vec2 pCoord = prevUV * vec2(res) - 0.5;
+            ivec2 base = ivec2(floor(pCoord));
+            vec2 f = pCoord - vec2(base);
+
+            for (int j = 0; j < 4; ++j) {
+                ivec2 tap = base + ivec2(j & 1, j >> 1);
+                if (any(lessThan(tap, ivec2(0))) || any(greaterThanEqual(tap, res))) continue;
+                float w = ((j & 1) == 0 ? 1.0 - f.x : f.x) * ((j >> 1) == 0 ? 1.0 - f.y : f.y);
+                if (w <= 1e-5) continue;
+
+                vec4 pg = texelFetch(prevGuideTex, tap, 0);
+                float pDepth = pg.w;
+                if (pDepth <= 0.0) continue;
+
+                vec3 pGeoN   = unpackNormal16(uint(round(pg.x)));
+                vec3 pShadeN = unpackNormal16(uint(round(pg.y)));
+                if (dot(geoNormal, pGeoN) < 0.90) continue;
+                if (dot(shadeNormal, pShadeN) < 0.45) continue;
+                if (abs(expectedPrevDepth - pDepth) > max(0.08, 0.05 * max(expectedPrevDepth, 0.1))) continue;
+
+                vec4 hs = texelFetch(diffHistTex, tap + prevSlowOff, 0);
+                vec4 hf = texelFetch(diffHistTex, tap + prevFastOff, 0);
+                vec2 hm = texelFetch(diffMomTex,  tap + prevMomOff,  0).rg;
+
+                oldSlow += w * hs.rgb;
+                oldAge  += w * hs.a;
+                oldFast += w * hf;
+                oldMom  += w * hm;
+                support += w;
+            }
         }
     }
-    float cLuma = luma(rad);
-    if (wSum > 0.5) {
-        moments /= wSum;
-    } else {
-        moments = vec2(cLuma, cLuma * cLuma);
+
+    if (support > 1e-4) {
+        oldSlow /= support;
+        oldAge  /= support;
+        oldFast /= support;
+        oldMom  /= support;
     }
 
-    float sigma = sqrt(max(moments.y - moments.x * moments.x, 0.0));
-    // Boost spatial filter width on newly disoccluded / low-history pixels.
-    sigma += (moments.x + 0.025) / max(exp2(min(age * 0.45, 10.0)) - 1.0, 0.25);
+    float age = min(DIFFUSE_MAX_HISTORY, oldAge + 1.0);
+    float alpha = 1.0 / max(age, 1.0);
 
-    // Leave-One-Out RCRS variance clamp removes isolated firefly outliers before large-radius filtering.
-    if (wSum >= 3.0) {
-        float margin = max(2.25 * sigma, 0.02 + 0.15 * moments.x);
-        float clampedLuma = clamp(cLuma, max(moments.x - margin, 0.0), moments.x + margin);
-        if (cLuma > 1e-5) {
-            rad *= clampedLuma / cLuma;
+    // Variance-aware responsive history (stable on dark/multi-lantern scenes, fast on real light changes).
+    float fastAlpha = 1.0 / min(age, 12.0);
+    float fastSafeLuma = (oldAge > 8.0) ? min(currLuma, max(oldFast.y * 4.0 + 0.5, 1.5)) : currLuma;
+    float fastLuma  = mix(oldFast.x, fastSafeLuma, fastAlpha);
+    float slowLuma  = mix(oldFast.y, currLuma, alpha);
+
+    vec2 moments = mix(oldMom, vec2(fastSafeLuma, fastSafeLuma * fastSafeLuma), alpha);
+    float stdDev = sqrt(max(moments.y - moments.x * moments.x, 0.0));
+
+    float noiseFloor = 3.5 * stdDev * inversesqrt(12.0) + 0.035;
+    float relChange = abs(fastLuma - slowLuma) / max(max(fastLuma, slowLuma), noiseFloor);
+    float response = smoothstep(0.45, 0.75, relChange);
+
+    if (response > 0.01 && age > 12.0) {
+        float targetAlpha = mix(alpha, 0.20, response);
+        alpha = max(alpha, targetAlpha);
+        age = 1.0 / alpha;
+        if (response > 0.65) slowLuma = fastLuma;
+    }
+
+    // Soft temporal firefly guard on settled pixels prevents isolated 20x spikes from pulsing.
+    vec3 safeCurr = curr;
+    if (oldAge >= 12.0 && response < 0.25) {
+        float maxSettledLuma = max(luma(oldSlow) * 12.0 + 2.5, 4.0);
+        if (currLuma > maxSettledLuma) {
+            safeCurr *= maxSettledLuma / max(currLuma, 1e-6);
         }
     }
 
-    // Perceptual compression before spatial filtering (inverted at end of pass 7).
-    float tonemapDenom = 1.0 + 0.5 * luma(rad);
-    rad /= tonemapDenom;
-    float sigmaScaled = max(sigma / tonemapDenom, 0.004);
+    vec3 integrated = mix(oldSlow, safeCurr, alpha);
 
-    imageStore(scratchImg, dstPx, roundHalf(vec4(rad, sigmaScaled)));
+    imageStore(diffHistImg, px + currSlowOff, roundHalf(vec4(integrated, age)));
+    imageStore(diffHistImg, px + currFastOff, roundHalf(vec4(fastLuma, slowLuma, age, 0.0)));
+    imageStore(diffMomImg,  px + currMomOff,  vec4(moments, 0.0, 0.0));
+    imageStore(scratchImg,  px,               roundHalf(vec4(integrated, age)));
 }

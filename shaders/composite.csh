@@ -63,14 +63,20 @@ void main() {
         // since tilted floors always have a closer neighbor!), reproject at exact planar virtual
         // reflection position `centerWorld + normalize(centerWorld) * hitDist`.
         if (centerDepth < 0.999999 && abs(centerDepth - bestDepth) < 0.002) {
-            GBufferMat mat = readGBuffer(px);
-            if (mat.roughness < 0.08 && dot(mat.shadeNormal, mat.geoNormal) > 0.998 && !mat.isHand) {
-                float hitDist = texelFetch(colortex4, px, 0).a;
-                if (hitDist > 0.05 && hitDist < 256.0) {
-                    vec3 centerWorld = viewToWorld(screenToView(vec3(uv, centerDepth)));
-                    reprojTarget = centerWorld + normalize(centerWorld) * hitDist;
-                    refUV = uv;
-                    isMirrorInterior = true;
+            float rough;
+            bool isHand;
+            readGBufferRoughHand(px, rough, isHand);
+            if (rough < 0.08 && !isHand) {
+                vec3 geoN, shadeN;
+                readGBufferNormals(px, geoN, shadeN);
+                if (dot(shadeN, geoN) > 0.998) {
+                    float hitDist = texelFetch(colortex4, px, 0).a;
+                    if (hitDist > 0.05 && hitDist < 256.0) {
+                        vec3 centerWorld = viewToWorld(screenToView(vec3(uv, centerDepth)));
+                        reprojTarget = centerWorld + normalize(centerWorld) * hitDist;
+                        refUV = uv;
+                        isMirrorInterior = true;
+                    }
                 }
             }
         }
@@ -107,19 +113,26 @@ void main() {
             m2 /= 9.0;
             vec3 sigma = sqrt(max(m2 - m1 * m1, vec3(0.0)));
             float speedPx = length(motion * vec2(res));
+            // Measure subpixel resampling misalignment (0 at exact texel center, 1 at half-texel):
+            // prevents fractional-pixel drift from compounding blur across frames!
+            vec2 fracPrev = abs(fract(prevUV * vec2(res) - 0.5) - 0.5);
+            float subpix = 1.0 - max(fracPrev.x, fracPrev.y) * 2.0;
+            float moveT = saturate(speedPx * 0.35);
+
             float gamma = isMirrorInterior
-                ? mix(1.1, 0.75, saturate(speedPx * 0.35))
-                : mix(1.6, 1.0,  saturate(speedPx * 0.25));
+                ? mix(1.05, 0.72, moveT)
+                : mix(1.35, 0.82, moveT);
             vec3 clipMin = max(bMin, m1 - gamma * sigma);
             vec3 clipMax = min(bMax, m1 + gamma * sigma);
 
             vec3 currK = karisForward(curr);
-            vec3 prevK = yCoCgToRgb(clamp(rgbToYCoCg(karisForward(prev)), clipMin, clipMax));
+            vec3 prevYcc = clipAABB(clipMin, clipMax, rgbToYCoCg(karisForward(prev)));
+            vec3 prevK = yCoCgToRgb(prevYcc);
 
             float alpha = isMirrorInterior
-                ? mix(0.12, 0.48, saturate(speedPx * 0.35))
-                : mix(0.07, 0.16, saturate(speedPx * 0.25));
-            result = karisInverse(mix(prevK, currK, alpha));
+                ? mix(0.12, 0.50, moveT)
+                : mix(0.09, 0.34, moveT) + 0.08 * subpix * smoothstep(0.05, 0.6, speedPx);
+            result = karisInverse(mix(prevK, currK, saturate(alpha)));
         }
     }
 

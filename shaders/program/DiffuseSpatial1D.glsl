@@ -1,6 +1,5 @@
-// 1D Separable 3-Tap Rotated-Axis Edge-Avoiding Filter (Sundial / iterationRP / Revoxelation hybrid)
-// Only 2 neighbor fetches per pass (16 total across 8 passes -> 2x faster than 4x 3x3 A-Trous!)
-// yet reaches +-48 pixels with grazing-angle foreshortening and jittered steps to wipe out blotches!
+// 1D Separable 5-Tap Edge-Avoiding Filter (4 passes = 16 taps, 2x fewer full-screen passes & barriers!)
+// Covers +-32..48 pixels across 4 orthogonal/diagonal passes with grazing-angle foreshortening and blue-noise jitter.
 #include "/lib/SVGF.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -33,9 +32,8 @@ void main() {
     float centerSigma = max(center.a, 0.004);
 
     // Fetch ONLY colortex2 (normals) + depthtex1 — zero colortex1 albedo bandwidth!
-    uint g1 = texelFetch(colortex2, px, 0).r;
-    vec3 centerGeoN   = unpackNormal16(g1 & 65535u);
-    vec3 centerShadeN = unpackNormal16(g1 >> 16u);
+    vec3 centerGeoN, centerShadeN;
+    readGBufferNormals(px, centerGeoN, centerShadeN);
 
     vec2 uv = (vec2(px) + 0.5) * texelSize();
     vec3 viewPos = screenToView(vec3(uv, depth));
@@ -46,11 +44,11 @@ void main() {
     vec2 axis = DIFFUSE_1D_AXIS;
     vec2 offsetScale = 1.0 - abs(viewGeoN.xy) * (1.0 - absNdotV);
 
-    // Spatiotemporal jitter breaks fixed-grid ringing and A-Trous waves.
+    // Spatiotemporal blue-noise jitter breaks fixed-grid ringing and A-Trous waves.
     float jitter = stbn2D(px, frameCounter + DIFFUSE_1D_PASS * 7, 11u).x;
-    ivec2 tapOffset = ivec2(round(axis * offsetScale * (0.70 + 0.60 * jitter)));
-    if (tapOffset == ivec2(0)) {
-        tapOffset = ivec2(sign(axis));
+    ivec2 baseStep = ivec2(round(axis * offsetScale * (0.75 + 0.50 * jitter)));
+    if (baseStep == ivec2(0)) {
+        baseStep = ivec2(sign(axis));
     }
 
     float planeTol = max(0.035, 0.008 * (-viewPos.z));
@@ -61,16 +59,19 @@ void main() {
     vec4 sum = center;
     float sumW = 1.0;
 
-    for (int i = 0; i < 2; ++i) {
-        ivec2 q = px + tapOffset;
-        tapOffset = -tapOffset;
+    // 4 neighbor taps: +1, -1 (weight 0.85), +2, -2 (weight 0.55) along the axis!
+    const int mults[4] = int[4](1, -1, 2, -2);
+    const float kW[4]  = float[4](0.85, 0.85, 0.55, 0.55);
+
+    for (int i = 0; i < 4; ++i) {
+        ivec2 q = px + baseStep * mults[i];
         if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
 
         float qd = texelFetch(depthtex1, q, 0).r;
         if (qd >= 0.999999) continue;
 
-        uint qg1 = texelFetch(colortex2, q, 0).r;
-        vec3 qGeoN = unpackNormal16(qg1 & 65535u);
+        vec3 qGeoN, qShadeN;
+        readGBufferNormals(q, qGeoN, qShadeN);
         if (dot(centerGeoN, qGeoN) < 0.90) continue;
 
         vec2 qUv = (vec2(q) + 0.5) * texelSize();
@@ -78,7 +79,6 @@ void main() {
         float planeDist = abs(dot(qViewPos - viewPos, viewGeoN));
         if (planeDist > planeTol) continue;
 
-        vec3 qShadeN = unpackNormal16(qg1 >> 16u);
         float wNorm = pow(max(dot(centerShadeN, qShadeN), 0.0), 8.0);
         if (wNorm < 1e-4) continue;
 
@@ -87,7 +87,7 @@ void main() {
             ? exp(-abs(luma(tap.rgb) - centerLuma) * lumaWeightScale)
             : 1.0;
 
-        float w = wNorm * wLuma;
+        float w = kW[i] * wNorm * wLuma;
         sum  += tap * w;
         sumW += w;
     }

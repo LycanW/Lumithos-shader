@@ -1,118 +1,38 @@
 #version 430 compatibility
 
-// Pass: Specular Reflection (1 SPP GGX VNDF + 16-step SSR + Hybrid 6-Face/Non-Cube Raytrace)
-#define TRACE_HIGH_PRIM_GUARD
+// Pass: Dedicated Lightweight 1-SPP Direct Light NEE (RIS + Stained-Glass Visibility Ray)
+// Separated from deferred.csh to eliminate GRF register spilling on Xe-HPG; early-outs in ~0.00ms when no lights!
 #include "/lib/Raytrace.glsl"
-#include "/lib/SkyShadow.glsl"
-#include "/lib/ScreenTrace.glsl"
-#include "/lib/RadianceCache.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 const vec2 workGroupsRender = vec2(1.0, 1.0);
 
-layout(rgba16f) uniform writeonly image2D colorimg4;
+layout(rgba16f) uniform image2D colorimg3;
 
 void main() {
+    uint lCount = lightList.lightCount;
+    if (lCount == 0u || lCount > MAX_SCENE_LIGHTS) return;
+
     ivec2 px = ivec2(gl_GlobalInvocationID.xy);
     ivec2 res = ivec2(screenSize());
     if (any(greaterThanEqual(px, res))) return;
 
-    #ifndef SPECULAR_REFLECTIONS
-        imageStore(colorimg4, px, vec4(0.0));
-        return;
-    #endif
-
     float depth = texelFetch(depthtex1, px, 0).r;
-    if (depth >= 0.999999) {
-        imageStore(colorimg4, px, vec4(0.0));
-        return;
-    }
+    if (depth >= 0.999999) return;
 
-    GBufferMat mat = readGBuffer(px);
-    if (mat.roughness > SPECULAR_ROUGH_CUTOFF || mat.isHand) {
-        imageStore(colorimg4, px, vec4(0.0));
-        return;
-    }
+    vec3 geoNormal, shadeNormal;
+    readGBufferNormals(px, geoNormal, shadeNormal);
 
     vec2 uv = (vec2(px) + 0.5) * texelSize();
-    vec3 viewPos = screenToView(vec3(uv, depth));
-    // Pure mirrors trace along unjittered pixel centers so thin 1px cutout geometry (ladders, fences,
-    // iron bars) never shimmers or blinks across alpha gaps when TAA jitter oscillates!
-    if (mat.roughness < 0.08) {
-        vec4 vpRaw = gbufferProjectionInverse * vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
-        viewPos = vpRaw.xyz / vpRaw.w;
-    }
-    vec3 worldPos = viewToWorld(viewPos);
-    vec3 viewDir  = normalize(-worldPos); // toward camera in world space
-    uint rng = initRng(px, uint(frameCounter), 2u);
+    vec3 worldPos = viewToWorld(screenToView(vec3(uv, depth)));
+    float camDist = length(worldPos);
+    vec3 toCam = -worldPos / max(camDist, 1e-4);
+    vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, geoNormal, toCam, camDist);
 
-    vec3 rayDir;
-    if (mat.roughness < 0.08) {
-        rayDir = reflect(-viewDir, mat.shadeNormal);
-    } else {
-        rayDir = sampleGGXVNDF(viewDir, mat.shadeNormal, mat.roughness, stbn2D(px, frameCounter, 2u));
-    }
+    vec3 neeDir = vec3(0.0, 1.0, 0.0);
+    vec3 neeRad = sampleDirectLightsNEE(rayOrig, shadeNormal, false, 8, stbn2D(px, frameCounter, 8u), neeDir);
+    if (any(isnan(neeRad)) || any(isinf(neeRad)) || maxOf(neeRad) <= 1e-5) return;
 
-    if (dot(rayDir, mat.geoNormal) <= 0.0) {
-        rayDir = reflect(-viewDir, mat.geoNormal);
-    }
-
-    vec3 radiance = vec3(0.0);
-    float hitDist = 128.0;
-    bool ssrHit = false;
-
-    #ifdef SPECULAR_SSR
-        // Smooth/mirror surfaces (perceptual roughness < 0.25) bypass SSR and trace 100% exact 3D geometry
-        // so mirrors never bleed background objects behind them.
-        if (frameCounter > 1 && mat.roughness >= 0.25) {
-            vec2 prevHitUV;
-            float ssDist;
-            if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * mat.geoNormal) * 0.04, rayDir, 24, 0.65, nextFloat(rng), 0.25, prevHitUV, ssDist)) {
-                ivec2 hpx = clamp(ivec2(prevHitUV * screenSize()), ivec2(0), res - 1);
-                vec3 prevLit = texelFetch(colortex5, hpx, 0).rgb;
-                if (!any(isnan(prevLit)) && !any(isinf(prevLit))) {
-                    radiance = min(max(prevLit, vec3(0.0)), vec3(12.0));
-                    hitDist = ssDist;
-                    ssrHit = true;
-                }
-            }
-        }
-    #endif
-
-    if (!ssrHit) {
-        float camDist = length(worldPos);
-        vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, mat.geoNormal, viewDir, camDist);
-        // Full-res atlas LOD 0 for razor-sharp mirror reflections of 6-face & rotated block textures!
-        float specLod = mat.roughness < 0.25 ? 0.0 : 1.0;
-        int maxSpecSteps = mat.roughness < 0.22 ? SPECULAR_MAX_STEPS : 64;
-        TraceHit hit = traceScene(rayOrig, rayDir, maxSpecSteps, specLod, true);
-        if (hit.hit) {
-            hitDist = hit.dist;
-            radiance += hit.emitColor * (hit.emission * EMISSIVE_SCALE);
-
-            vec3 lightDir = getShadowLightDir();
-            float NdotL = max(dot(hit.normal, lightDir), 0.0);
-            if (NdotL > 0.0) {
-                vec3 vis = sampleShadowFastRay(hit.worldPos, hit.normal, rayDir);
-                radiance += hit.albedo * INV_PI * getDirectLightColor() * (NdotL * vis);
-            }
-
-            vec3 skyAmb = evalSky(hit.normal, false) * (0.15 + 0.85 * hit.skyLight);
-            vec3 bounce = (mat.roughness < 0.25)
-                ? queryRadianceCacheSmooth(hit.worldPos, hit.normal, skyAmb, 0u, stbn2D(px, frameCounter, 6u))
-                : queryRadianceCacheStochastic(hit.worldPos, hit.normal, 0u, stbn2D(px, frameCounter, 6u));
-            radiance += hit.albedo * bounce * 0.85;
-            radiance *= hit.throughput;
-        } else if (hit.exitedGrid) {
-            radiance = evalSky(rayDir, true) * hit.throughput;
-        } else {
-            radiance = queryRadianceCache(hit.worldPos, -rayDir, 0u, false) * hit.throughput;
-        }
-    }
-
-    float specClamp = (mat.roughness < 0.12) ? 32.0 : 12.0;
-    radiance = min(max(radiance, vec3(0.0)), vec3(specClamp));
-    if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
-
-    imageStore(colorimg4, px, vec4(radiance, hitDist));
+    vec4 prev = imageLoad(colorimg3, px);
+    imageStore(colorimg3, px, vec4(min(prev.rgb + neeRad, vec3(28.0)), prev.a));
 }

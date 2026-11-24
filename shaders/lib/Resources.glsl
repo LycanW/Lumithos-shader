@@ -255,6 +255,19 @@ GBufferMat readGBuffer(ivec2 pixel) {
     return m;
 }
 
+// Fast geometry-only G-Buffer helpers: skip colortex1 albedo unpack & pow(2.2) inside denoisers/SSRT!
+void readGBufferNormals(ivec2 pixel, out vec3 geoNormal, out vec3 shadeNormal) {
+    uint g1 = texelFetch(colortex2, pixel, 0).r;
+    geoNormal   = unpackNormal16(g1 & 65535u);
+    shadeNormal = unpackNormal16(g1 >> 16u);
+}
+
+void readGBufferRoughHand(ivec2 pixel, out float roughness, out bool isHand) {
+    uint w1 = texelFetch(colortex1, pixel, 0).g;
+    roughness = float(w1 & 255u) * (1.0 / 255.0);
+    isHand    = ((w1 >> 24u) & 1u) != 0u;
+}
+
 // ---- LabPBR 1.3 Specular Decode ----
 // Stores perceptual roughness (1 - smoothness) so GGX squares it ONCE (alpha = r^2),
 // and preserves raw f0 byte (0..255) so hardcoded/albedo-tinted metals keep full RGB F0.

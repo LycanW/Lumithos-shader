@@ -1,138 +1,123 @@
 #version 430 compatibility
 
-// Pass: Diffuse SVGF Temporal Accumulation (Ping-Pong Race-Free + 3x3 RCRS Despike + Variance-Aware Response)
-#include "/lib/SVGF.glsl"
+// Pass: Specular Reflection (1 SPP GGX VNDF + 24-step SSR + Hybrid 6-Face/Non-Cube Raytrace)
+#define TRACE_HIGH_PRIM_GUARD
+#include "/lib/Raytrace.glsl"
+#include "/lib/SkyShadow.glsl"
+#include "/lib/ScreenTrace.glsl"
+#include "/lib/RadianceCache.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 const vec2 workGroupsRender = vec2(1.0, 1.0);
 
-layout(rgba16f) uniform writeonly image2D diffHistImg;
-layout(rg32f)   uniform writeonly image2D diffMomImg;
-layout(rgba16f) uniform writeonly image2D scratchImg;
+layout(rgba16f) uniform writeonly image2D colorimg4;
 
 void main() {
     ivec2 px = ivec2(gl_GlobalInvocationID.xy);
     ivec2 res = ivec2(screenSize());
     if (any(greaterThanEqual(px, res))) return;
 
-    int currSide = frameCounter & 1;
-    int prevSide = currSide ^ 1;
-    ivec2 prevSlowOff = ivec2((prevSide * 2) * res.x, 0);
-    ivec2 prevFastOff = ivec2((prevSide * 2 + 1) * res.x, 0);
-    ivec2 currSlowOff = ivec2((currSide * 2) * res.x, 0);
-    ivec2 currFastOff = ivec2((currSide * 2 + 1) * res.x, 0);
-    ivec2 prevMomOff  = ivec2(prevSide * res.x, 0);
-    ivec2 currMomOff  = ivec2(currSide * res.x, 0);
+    #ifndef SPECULAR_REFLECTIONS
+        imageStore(colorimg4, px, vec4(0.0));
+        return;
+    #endif
 
     float depth = texelFetch(depthtex1, px, 0).r;
     if (depth >= 0.999999) {
-        imageStore(scratchImg, px, vec4(0.0));
-        imageStore(diffHistImg, px + currSlowOff, vec4(0.0));
-        imageStore(diffHistImg, px + currFastOff, vec4(0.0));
-        imageStore(diffMomImg,  px + currMomOff,  vec4(0.0));
+        imageStore(colorimg4, px, vec4(0.0));
         return;
     }
 
-    GBufferMat mat = readGBuffer(px);
+    // Fast roughness early-out BEFORE reading normals or unpacking albedo!
+    float roughness;
+    bool isHand;
+    readGBufferRoughHand(px, roughness, isHand);
+    if (roughness > SPECULAR_ROUGH_CUTOFF || isHand) {
+        imageStore(colorimg4, px, vec4(0.0));
+        return;
+    }
+
+    vec3 geoNormal, shadeNormal;
+    readGBufferNormals(px, geoNormal, shadeNormal);
+
     vec2 uv = (vec2(px) + 0.5) * texelSize();
-    vec3 viewPos  = screenToView(vec3(uv, depth));
+    vec3 viewPos = screenToView(vec3(uv, depth));
+    // Pure mirrors trace along unjittered pixel centers so thin 1px cutout geometry (ladders, fences,
+    // iron bars) never shimmers or blinks across alpha gaps when TAA jitter oscillates!
+    if (roughness < 0.08) {
+        vec4 vpRaw = gbufferProjectionInverse * vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+        viewPos = vpRaw.xyz / vpRaw.w;
+    }
     vec3 worldPos = viewToWorld(viewPos);
-    float expectedPrevDepth = -(gbufferPreviousModelView * vec4(worldPos + cameraVelocity, 1.0)).z;
+    vec3 viewDir  = normalize(-worldPos); // toward camera in world space
 
-    vec3 raw = max(texelFetch(colortex3, px, 0).rgb, vec3(0.0));
-    if (any(isnan(raw)) || any(isinf(raw))) raw = vec3(0.0);
-    // Preserve distant small-emitter hits while suppressing extreme multi-light fireflies.
-    vec3 curr = despike3x3(colortex3, px, res, raw, mat.geoNormal, mat.shadeNormal, depth, 6.0, 0.8);
-    float currLuma = luma(curr);
+    vec3 rayDir;
+    if (roughness < 0.08) {
+        rayDir = reflect(-viewDir, shadeNormal);
+    } else {
+        rayDir = sampleGGXVNDF(viewDir, shadeNormal, roughness, stbn2D(px, frameCounter, 2u));
+    }
 
-    // Bilinear geometric reprojection against prevGuideTex (exact integer normal decode).
-    vec3 oldSlow = vec3(0.0);
-    vec4 oldFast = vec4(0.0);
-    vec2 oldMom  = vec2(0.0);
-    float oldAge = 0.0;
-    float support = 0.0;
+    if (dot(rayDir, geoNormal) <= 0.0) {
+        rayDir = reflect(-viewDir, geoNormal);
+    }
 
-    if (frameCounter > 1 && !mat.isHand) {
-        vec2 prevUV = reprojectScreenUV(uv, worldPos);
-        if (all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThan(prevUV, vec2(1.0)))) {
-            vec2 pCoord = prevUV * vec2(res) - 0.5;
-            ivec2 base = ivec2(floor(pCoord));
-            vec2 f = pCoord - vec2(base);
+    vec3 radiance = vec3(0.0);
+    float hitDist = 128.0;
+    bool ssrHit = false;
 
-            for (int j = 0; j < 4; ++j) {
-                ivec2 tap = base + ivec2(j & 1, j >> 1);
-                if (any(lessThan(tap, ivec2(0))) || any(greaterThanEqual(tap, res))) continue;
-                float w = ((j & 1) == 0 ? 1.0 - f.x : f.x) * ((j >> 1) == 0 ? 1.0 - f.y : f.y);
-                if (w <= 1e-5) continue;
-
-                vec4 pg = texelFetch(prevGuideTex, tap, 0);
-                float pDepth = pg.w;
-                if (pDepth <= 0.0) continue;
-
-                vec3 pGeoN   = unpackNormal16(uint(round(pg.x)));
-                vec3 pShadeN = unpackNormal16(uint(round(pg.y)));
-                if (dot(mat.geoNormal, pGeoN) < 0.90) continue;
-                if (dot(mat.shadeNormal, pShadeN) < 0.45) continue;
-                if (abs(expectedPrevDepth - pDepth) > max(0.08, 0.05 * max(expectedPrevDepth, 0.1))) continue;
-
-                vec4 hs = texelFetch(diffHistTex, tap + prevSlowOff, 0);
-                vec4 hf = texelFetch(diffHistTex, tap + prevFastOff, 0);
-                vec2 hm = texelFetch(diffMomTex,  tap + prevMomOff,  0).rg;
-
-                oldSlow += w * hs.rgb;
-                oldAge  += w * hs.a;
-                oldFast += w * hf;
-                oldMom  += w * hm;
-                support += w;
+    #ifdef SPECULAR_SSR
+        // Smooth/mirror surfaces (perceptual roughness < 0.25) bypass SSR and trace 100% exact 3D geometry
+        // so mirrors never bleed background objects behind them.
+        if (frameCounter > 1 && roughness >= 0.25) {
+            vec2 prevHitUV;
+            float ssDist;
+            if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * geoNormal) * 0.04, rayDir, 24, 0.65, stbn2D(px, frameCounter, 10u).x, 0.25, prevHitUV, ssDist)) {
+                ivec2 hpx = clamp(ivec2(prevHitUV * screenSize()), ivec2(0), res - 1);
+                vec3 prevLit = texelFetch(colortex5, hpx, 0).rgb;
+                if (!any(isnan(prevLit)) && !any(isinf(prevLit))) {
+                    radiance = min(max(prevLit, vec3(0.0)), vec3(12.0));
+                    hitDist = ssDist;
+                    ssrHit = true;
+                }
             }
         }
-    }
+    #endif
 
-    if (support > 1e-4) {
-        oldSlow /= support;
-        oldAge  /= support;
-        oldFast /= support;
-        oldMom  /= support;
-    }
+    if (!ssrHit) {
+        float camDist = length(worldPos);
+        vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, geoNormal, viewDir, camDist);
+        // Full-res atlas LOD 0 for razor-sharp mirror reflections of 6-face & rotated block textures!
+        float specLod = roughness < 0.25 ? 0.0 : 1.0;
+        int maxSpecSteps = roughness < 0.22 ? SPECULAR_MAX_STEPS : 48;
+        TraceHit hit = traceScene(rayOrig, rayDir, maxSpecSteps, specLod, true);
+        if (hit.hit) {
+            hitDist = hit.dist;
+            radiance += hit.emitColor * (hit.emission * EMISSIVE_SCALE);
 
-    float age = min(DIFFUSE_MAX_HISTORY, oldAge + 1.0);
-    float alpha = 1.0 / max(age, 1.0);
+            vec3 lightDir = getShadowLightDir();
+            float NdotL = max(dot(hit.normal, lightDir), 0.0);
+            if (NdotL > 0.0) {
+                vec3 vis = sampleShadowFastRay(hit.worldPos, hit.normal, rayDir);
+                radiance += hit.albedo * INV_PI * getDirectLightColor() * (NdotL * vis);
+            }
 
-    // Variance-aware responsive history (stable on dark/multi-lantern scenes, fast on real light changes).
-    // Feed fastLuma a spike-guarded sample so a single rare 1-SPP lantern firefly NEVER wipes out
-    // 96 frames of converged history and creates a pulsing light blotch!
-    float fastAlpha = 1.0 / min(age, 12.0);
-    float fastSafeLuma = (oldAge > 8.0) ? min(currLuma, max(oldFast.y * 4.0 + 0.5, 1.5)) : currLuma;
-    float fastLuma  = mix(oldFast.x, fastSafeLuma, fastAlpha);
-    float slowLuma  = mix(oldFast.y, currLuma, alpha);
-
-    vec2 moments = mix(oldMom, vec2(fastSafeLuma, fastSafeLuma * fastSafeLuma), alpha);
-    float stdDev = sqrt(max(moments.y - moments.x * moments.x, 0.0));
-
-    float noiseFloor = 3.5 * stdDev * inversesqrt(12.0) + 0.035;
-    float relChange = abs(fastLuma - slowLuma) / max(max(fastLuma, slowLuma), noiseFloor);
-    float response = smoothstep(0.45, 0.75, relChange);
-
-    if (response > 0.01 && age > 12.0) {
-        float targetAlpha = mix(alpha, 0.20, response);
-        alpha = max(alpha, targetAlpha);
-        age = 1.0 / alpha;
-        if (response > 0.65) slowLuma = fastLuma;
-    }
-
-    // Soft temporal firefly guard on settled pixels prevents isolated 20x spikes from pulsing.
-    vec3 safeCurr = curr;
-    if (oldAge >= 12.0 && response < 0.25) {
-        float maxSettledLuma = max(luma(oldSlow) * 12.0 + 2.5, 4.0);
-        if (currLuma > maxSettledLuma) {
-            safeCurr *= maxSettledLuma / max(currLuma, 1e-6);
+            vec3 skyAmb = evalSky(hit.normal, false) * (0.15 + 0.85 * hit.skyLight);
+            vec3 bounce = (roughness < 0.25)
+                ? queryRadianceCacheSmooth(hit.worldPos, hit.normal, skyAmb, 0u, stbn2D(px, frameCounter, 6u))
+                : queryRadianceCacheStochastic(hit.worldPos, hit.normal, 0u, stbn2D(px, frameCounter, 6u));
+            radiance += hit.albedo * bounce * 0.85;
+            radiance *= hit.throughput;
+        } else if (hit.exitedGrid) {
+            radiance = evalSky(rayDir, true) * hit.throughput;
+        } else {
+            radiance = queryRadianceCache(hit.worldPos, -rayDir, 0u, false) * hit.throughput;
         }
     }
 
-    vec3 integrated = mix(oldSlow, safeCurr, alpha);
+    float specClamp = (roughness < 0.12) ? 32.0 : 12.0;
+    radiance = min(max(radiance, vec3(0.0)), vec3(specClamp));
+    if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
 
-    imageStore(diffHistImg, px + currSlowOff, roundHalf(vec4(integrated, age)));
-    imageStore(diffHistImg, px + currFastOff, roundHalf(vec4(fastLuma, slowLuma, age, 0.0)));
-    imageStore(diffMomImg,  px + currMomOff,  vec4(moments, 0.0, 0.0));
-    imageStore(scratchImg,  px,               roundHalf(vec4(integrated, age)));
+    imageStore(colorimg4, px, vec4(radiance, hitDist));
 }

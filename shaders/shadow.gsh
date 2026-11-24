@@ -49,6 +49,14 @@ void voxelizeTerrainTriangle() {
     vec3 vp1 = worldToVoxelPos(vWorldPos[1]);
     vec3 vp2 = worldToVoxelPos(vWorldPos[2]);
 
+    // Fast AABB early-out for triangles strictly outside the 160x96x160 voxel grid (80..128 blocks away):
+    // skips cross/normalize/log2/atomics on ~60% of shadow-pass geometry!
+    vec3 rawMin = min(vp0, min(vp1, vp2));
+    vec3 rawMax = max(vp0, max(vp1, vp2));
+    if (any(lessThan(rawMax, vec3(0.0))) || any(greaterThanEqual(rawMin, vec3(VOXEL_RES_XZ, VOXEL_RES_Y, VOXEL_RES_XZ)))) {
+        return;
+    }
+
     vec3 e1 = vp1 - vp0;
     vec3 e2 = vp2 - vp0;
     vec3 rawNormal = cross(e1, e2);

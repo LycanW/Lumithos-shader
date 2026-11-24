@@ -52,8 +52,9 @@ bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float maxScreen
         float thickness = 0.18 + 0.035 * sceneLinZ;
 
         if (diffZ > 0.02 && diffZ < thickness) {
-            GBufferMat hitMat = readGBuffer(px);
-            if (dot(hitMat.geoNormal, worldDir) < 0.0) {
+            vec3 hitGeoN, hitShadeN;
+            readGBufferNormals(px, hitGeoN, hitShadeN);
+            if (dot(hitGeoN, worldDir) < 0.0) {
                 vec3 hitView = screenToView(vec3(p.xy, sceneDepth));
                 float d = distance(hitView, viewOrigin);
                 if (d >= minWorldDist) {
@@ -67,7 +68,7 @@ bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float maxScreen
                         float expectedPrevZ = -(gbufferPreviousModelView * vec4(hitWorld + cameraVelocity, 1.0)).z;
                         if (pg.w > 0.0 && abs(expectedPrevZ - pg.w) < max(0.15, 0.08 * max(expectedPrevZ, 0.1))) {
                             vec3 pGeoN = unpackNormal16(uint(round(pg.x)));
-                            if (dot(hitMat.geoNormal, pGeoN) > 0.85) {
+                            if (dot(hitGeoN, pGeoN) > 0.85) {
                                 prevHitUV = puv;
                                 hitDist = d;
                                 return true;

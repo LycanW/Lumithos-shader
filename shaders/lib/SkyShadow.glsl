@@ -57,13 +57,23 @@ vec3 getDirectLightColor() {
     return lightCol * fade * (1.0 - 0.8 * rainStrength);
 }
 
-// Exact world-space size of 1 shadow texel at worldPos under radial shadow distortion,
-// plus exact shadow-screen Z delta per world block (matches clipPos.z *= 0.5 in shadow.vsh).
-float shadowTexelWorldSize(vec3 worldPos) {
-    vec2 clipXY = (shadowProjection * (shadowModelView * vec4(worldPos, 1.0))).xy;
-    float factor = shadowDistortFactor(clipXY);
+// Single-transform shadow-screen helper: computes undistorted clip once to derive exact
+// local distorted texel size, then applies linear clip-space normal/pullback offset (saves 50% mat4 ALU!).
+vec3 worldToShadowScreenBiased(vec3 worldPos, vec3 normal, vec3 pullbackDir, float normalTexelMul, float minOff, float maxOff) {
+    mat3 smRot = mat3(shadowModelView);
+    vec3 svPos = (shadowModelView * vec4(worldPos, 1.0)).xyz;
+    vec3 rawClip = (shadowProjection * vec4(svPos, 1.0)).xyz;
+    float factor = shadowDistortFactor(rawClip.xy);
     float baseTexel = (2.0 * shadowDistance) / float(shadowMapResolution);
-    return baseTexel * (factor * factor / 0.15);
+    float texelWorld = baseTexel * (factor * factor / 0.15);
+    float normalOffset = clamp(texelWorld * normalTexelMul, minOff, maxOff);
+
+    vec3 worldBias = normal * normalOffset + pullbackDir * 0.008;
+    vec3 clipBias  = mat3(shadowProjection) * (smRot * worldBias);
+    vec3 sp = rawClip + clipBias;
+    sp.xy = distortShadowXY(sp.xy);
+    sp.z *= 0.5;
+    return sp * 0.5 + 0.5;
 }
 
 float shadowScreenZPerBlock() {
@@ -85,17 +95,12 @@ vec3 evalShadowTapColored(vec2 uv, float zRef) {
 }
 
 // Fast 1-tap colored shadow lookup for secondary bounces, reflections & Radiance Cache probes.
-// Uses exact distortion-aware normal offset (1.25x local texel) + minimal 0.015-block Z epsilon
-// so shadows stay tightly locked to block bases and stained glass casts colored sunlight cleanly.
 vec3 sampleShadowFastRay(vec3 worldPos, vec3 normal, vec3 inRayDir) {
     vec3 lightDir = getShadowLightDir();
     float NdotL = dot(normal, lightDir);
     if (NdotL <= 0.0) return vec3(0.0);
 
-    float texelWorld = shadowTexelWorldSize(worldPos);
-    float normalOffset = clamp(texelWorld * 1.25, 0.014, 0.25);
-    vec3 biasedPos = worldPos + normal * normalOffset - inRayDir * 0.008;
-    vec3 sp = worldToShadowScreen(biasedPos);
+    vec3 sp = worldToShadowScreenBiased(worldPos, normal, -inRayDir, 1.25, 0.014, 0.25);
     if (any(lessThan(sp, vec3(0.0))) || any(greaterThan(sp, vec3(1.0)))) return vec3(1.0);
 
     float bias = max(0.015 * shadowScreenZPerBlock(), 2.0e-5);
@@ -116,10 +121,7 @@ vec3 sampleShadowPCF(vec3 worldPos, vec3 normal, float blueNoise01) {
 
     float dist = length(worldPos);
     vec3 toCam = -worldPos / max(dist, 1e-4);
-    float texelWorld = shadowTexelWorldSize(worldPos);
-    float normalOffset = clamp(texelWorld * 1.65, 0.018, 0.30);
-    vec3 biasedPos = worldPos + normal * normalOffset + toCam * 0.008;
-    vec3 sp = worldToShadowScreen(biasedPos);
+    vec3 sp = worldToShadowScreenBiased(worldPos, normal, toCam, 1.65, 0.018, 0.30);
     if (any(lessThan(sp, vec3(0.0))) || any(greaterThan(sp, vec3(1.0)))) return vec3(1.0);
 
     float bias = max(0.015 * shadowScreenZPerBlock(), 2.0e-5);

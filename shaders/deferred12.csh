@@ -1,160 +1,104 @@
 #version 430 compatibility
 
-// Pass: Specular SVGF Temporal Accumulation (Ping-Pong Race-Free + Roughness-Aware Despike)
-#include "/lib/SVGF.glsl"
+// Pass: Combine Direct Sunlight + Emission + Diffuse GI + Specular GI + Sky + Debug Views,
+// and publish prevGuideImg (exact float32 integers!) + diffuse-safe colortex5 (lit history).
+#include "/lib/Raytrace.glsl"
+#include "/lib/SkyShadow.glsl"
+#include "/lib/RadianceCache.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 const vec2 workGroupsRender = vec2(1.0, 1.0);
 
-layout(rgba16f) uniform writeonly image2D specHistImg;
-layout(rg32f)   uniform writeonly image2D specMomImg;
-layout(rgba16f) uniform writeonly image2D scratchImg;
+layout(rgba16f) uniform writeonly image2D colorimg0;
+layout(rgba16f) uniform writeonly image2D colorimg5;
+layout(rgba32f) uniform writeonly image2D prevGuideImg;
 
 void main() {
     ivec2 px = ivec2(gl_GlobalInvocationID.xy);
     ivec2 res = ivec2(screenSize());
     if (any(greaterThanEqual(px, res))) return;
 
-    int currSide = frameCounter & 1;
-    int prevSide = currSide ^ 1;
-    ivec2 prevOff = ivec2(prevSide * res.x, 0);
-    ivec2 currOff = ivec2(currSide * res.x, 0);
-
+    vec2 uv = (vec2(px) + 0.5) * texelSize();
     float depth = texelFetch(depthtex1, px, 0).r;
+
     if (depth >= 0.999999) {
-        imageStore(scratchImg, px, vec4(0.0));
-        imageStore(specHistImg, px + currOff, vec4(0.0));
-        imageStore(specMomImg,  px + currOff, vec4(0.0));
+        vec3 skyDir = normalize(viewToWorld(screenToView(vec3(uv, 1.0))));
+        vec3 sky = evalSky(skyDir, true);
+        imageStore(colorimg0, px, vec4(sky, 1.0));
+        imageStore(colorimg5, px, vec4(sky, 1.0));
+        imageStore(prevGuideImg, px, vec4(0.0));
         return;
     }
 
     GBufferMat mat = readGBuffer(px);
-    if (mat.roughness > SPECULAR_ROUGH_CUTOFF || mat.isHand) {
-        imageStore(scratchImg, px, vec4(0.0));
-        imageStore(specHistImg, px + currOff, vec4(0.0));
-        imageStore(specMomImg,  px + currOff, vec4(0.0));
-        return;
-    }
-
-    vec2 uv = (vec2(px) + 0.5) * texelSize();
     vec3 viewPos  = screenToView(vec3(uv, depth));
     vec3 worldPos = viewToWorld(viewPos);
-    float expectedPrevDepth = -(gbufferPreviousModelView * vec4(worldPos + cameraVelocity, 1.0)).z;
+    vec3 viewDir  = normalize(-worldPos);
 
-    vec4 rawTap = texelFetch(colortex4, px, 0);
-    vec3 raw = max(rawTap.rgb, vec3(0.0));
-    if (any(isnan(raw)) || any(isinf(raw))) raw = vec3(0.0);
+    // Publish exact float32 integer-encoded 16-bit normals (never denormal uintBitsToFloat!).
+    imageStore(prevGuideImg, px, vec4(
+        float(packNormal16(mat.geoNormal)),
+        float(packNormal16(mat.shadeNormal)),
+        mat.roughness,
+        -viewPos.z
+    ));
 
-    // Pure FLAT deterministic mirrors (roughness < 0.08 & no normal-map bump) have zero sampling or
-    // normal-map TAA-jitter noise: bypass temporal accumulation completely for zero ghosting,
-    // and preserve hitDist in .a so TAA can reproject at exact planar virtual parallax!
-    // Bumpy normal-mapped glossy surfaces run gentle temporal stabilization so normal-map facets don't sparkle.
-    bool isFlatMirror = (mat.roughness < 0.08) && (dot(mat.shadeNormal, mat.geoNormal) > 0.998);
-    if (isFlatMirror) {
-        imageStore(specHistImg, px + currOff, roundHalf(vec4(raw, 1.0)));
-        imageStore(specMomImg,  px + currOff, vec4(luma(raw), luma(raw) * luma(raw), 0.0, 0.0));
-        imageStore(scratchImg,  px,           roundHalf(vec4(raw, rawTap.a)));
-        return;
+    // Direct Sunlight / Moonlight (4-tap blue-noise-rotated colored PCF on Shadow Map)
+    vec3 lightDir = getShadowLightDir();
+    float NdotL = max(dot(mat.shadeNormal, lightDir), 0.0);
+    vec3 shadowVis = (NdotL > 0.0) ? sampleShadowPCF(worldPos, mat.geoNormal, stbn2D(px, frameCounter, 7u).x) : vec3(0.0);
+    vec3 directDiffuse = mat.albedo * INV_PI * getDirectLightColor() * (NdotL * shadowVis);
+
+    // Direct Specular Highlight (GGX with LabPBR RGB F0 & physical NDF cap)
+    vec3 F0_rgb = evalLabPBRF0(mat.f0, mat.albedo);
+    bool isMetal = isLabPBRMetal(mat.f0);
+    vec3 directSpec = vec3(0.0);
+    if (NdotL > 0.0 && maxOf(shadowVis) > 0.0) {
+        vec3 H = normalize(lightDir + viewDir);
+        float NdotH = max(dot(mat.shadeNormal, H), 0.0);
+        float alpha = max(mat.roughness * mat.roughness, 0.015);
+        float a2 = alpha * alpha;
+        float dDenom = NdotH * NdotH * (a2 - 1.0) + 1.0;
+        float D = min(a2 / max(PI * dDenom * dDenom, 1e-5), 128.0);
+        vec3 F = fresnelSchlick(F0_rgb, max(dot(H, viewDir), 0.0));
+        directSpec = F * D * 0.25 * getDirectLightColor() * (NdotL * shadowVis);
     }
 
-    // Roughness-scaled 3x3 firefly despike for ALL stochastic GGX surfaces (0.08..0.50):
-    // Prevents isolated 1-SPP lantern hits on polished glossy walls/floors from spawning glowing blotches!
-    float roughT = smoothstep(0.08, 0.35, mat.roughness);
-    vec3 curr = despike3x3(colortex4, px, res, raw, mat.geoNormal, mat.shadeNormal, depth,
-                           mix(5.5, 2.8, roughT), mix(0.22, 0.04, roughT));
-    float currLuma = luma(curr);
+    vec3 diffuseGI  = max(texelFetch(colortex3, px, 0).rgb, vec3(0.0));
+    vec3 specularGI = max(texelFetch(colortex4, px, 0).rgb, vec3(0.0));
+    vec3 emissive   = (mat.emission > 0.0) ? (evalDirectEmitterColor(mat.albedo) * (mat.emission * EMISSIVE_SCALE)) : vec3(0.0);
 
-    // Virtual reflection depth reprojection for smooth mirrors, surface reprojection for rough.
-    vec3 viewDir = normalize(worldPos);
-    vec3 reprojPos = mix(worldPos + viewDir * min(rawTap.a, 64.0), worldPos, smoothstep(0.12, 0.35, mat.roughness));
+    vec3 F_env = fresnelSchlick(F0_rgb, max(dot(mat.shadeNormal, viewDir), 0.0));
+    float specMask = (mat.roughness <= SPECULAR_ROUGH_CUTOFF && !mat.isHand) ? 1.0 : 0.0;
+    vec3 kD = isMetal ? vec3(0.0) : (1.0 - F_env * specMask);
 
-    vec3 oldSlow = vec3(0.0);
-    vec2 oldMom  = vec2(0.0);
-    float oldAge = 0.0;
-    float support = 0.0;
-    float speedPx = 0.0;
+    vec3 diffuseLit = directDiffuse * kD + (diffuseGI * mat.albedo) * kD + emissive;
+    vec3 finalLit   = diffuseLit + directSpec + specularGI * F_env * specMask;
 
-    if (frameCounter > 1) {
-        vec2 prevUV = reprojectScreenUV(uv, reprojPos);
-        if (all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThan(prevUV, vec2(1.0)))) {
-            speedPx = length((prevUV - uv) * vec2(res));
-            vec2 pCoord = prevUV * vec2(res) - 0.5;
-            ivec2 base = ivec2(floor(pCoord));
-            vec2 f = pCoord - vec2(base);
+    // Store pure diffuse+emissive radiance in colortex5.rgb, and emission flag in .a so
+    // DIFFUSE_SSRT can stay enabled alongside NEE without double-counting block lamps!
+    imageStore(colorimg5, px, vec4(diffuseLit, mat.emission));
 
-            for (int j = 0; j < 4; ++j) {
-                ivec2 tap = base + ivec2(j & 1, j >> 1);
-                if (any(lessThan(tap, ivec2(0))) || any(greaterThanEqual(tap, res))) continue;
-                float w = ((j & 1) == 0 ? 1.0 - f.x : f.x) * ((j >> 1) == 0 ? 1.0 - f.y : f.y);
-                if (w <= 1e-5) continue;
-
-                vec4 pg = texelFetch(prevGuideTex, tap, 0);
-                float pDepth = pg.w;
-                if (pDepth <= 0.0) continue;
-
-                vec3 pGeoN = unpackNormal16(uint(round(pg.x)));
-                if (dot(mat.geoNormal, pGeoN) < 0.94) continue;
-                if (abs(expectedPrevDepth - pDepth) > max(0.08, 0.05 * max(expectedPrevDepth, 0.1))) continue;
-                if (abs(mat.roughness - pg.z) > max(0.06, 0.25 * max(mat.roughness, pg.z))) continue;
-
-                vec4 hs = texelFetch(specHistTex, tap + prevOff, 0);
-                vec2 hm = texelFetch(specMomTex,  tap + prevOff, 0).rg;
-                oldSlow += w * hs.rgb;
-                oldAge  += w * hs.a;
-                oldMom  += w * hm;
-                support += w;
+    // Optional Debug Visualizations
+    #if DEBUG_VIEW == 1 || DEBUG_VIEW == 2
+        finalLit = diffuseGI;
+    #elif DEBUG_VIEW == 3
+        finalLit = specularGI;
+    #elif DEBUG_VIEW == 4
+        finalLit = queryRadianceCache(worldPos, mat.geoNormal, 0u, false);
+    #elif DEBUG_VIEW == 5
+        ivec3 vCoord = ivec3(floor(worldToVoxelPos(worldPos - mat.geoNormal * 0.05)));
+        vec3 dbg = vec3(0.05, 0.05, 0.15);
+        if (inVoxelBounds(vCoord)) {
+            if (texelFetch(voxelGridTex, vCoord, 0).r != 0u) {
+                SurfaceVoxel sv = surfacePool.surfaces[voxelLinearIndex(vCoord)];
+                bool hasT1 = (sv.face[0] | sv.face[1] | sv.face[2] | sv.face[3] | sv.face[4] | sv.face[5]) != 0u;
+                bool hasT2 = (sv.primHead != PRIM_END);
+                dbg = vec3(hasT2 ? 1.0 : 0.0, hasT1 ? 1.0 : 0.0, 0.0);
             }
         }
-    }
+        finalLit = dbg;
+    #endif
 
-    if (support > 1e-4) {
-        oldSlow /= support;
-        oldAge  /= support;
-        oldMom  /= support;
-
-        // Motion-gated 3x3 neighborhood clamp:
-        // Only clamp converged glossy history during actual camera/reflection motion so stationary
-        // 1-SPP glossy reflections converge rock-solid without flickering or popping bright spots!
-        float motionClampW = smoothstep(0.20, 1.75, speedPx);
-        if (motionClampW > 0.01) {
-            vec3 nMin = curr;
-            vec3 nMax = curr;
-            for (int y = -1; y <= 1; ++y) {
-                for (int x = -1; x <= 1; ++x) {
-                    if (x == 0 && y == 0) continue;
-                    ivec2 q = clamp(px + ivec2(x, y), ivec2(0), res - 1);
-                    vec3 s = max(texelFetch(colortex4, q, 0).rgb, vec3(0.0));
-                    nMin = min(nMin, s);
-                    nMax = max(nMax, s);
-                }
-            }
-            vec3 margin = max((nMax - nMin) * 0.5, vec3(0.05));
-            vec3 clampedHist = clamp(oldSlow, max(nMin - margin, vec3(0.0)), nMax + margin);
-            oldSlow = mix(oldSlow, clampedHist, motionClampW);
-        }
-    }
-
-    float moveDecay = exp(-length(cameraVelocity) * (mat.roughness < 0.20 ? 5.0 : 2.0));
-    oldAge *= moveDecay;
-
-    // Soft temporal firefly guard on settled glossy pixels suppresses stray 1-SPP lantern spikes.
-    vec3 safeCurr = curr;
-    if (support > 1e-4 && oldAge >= 8.0 && speedPx < 0.75) {
-        float maxSpecLuma = max(luma(oldSlow) * 6.0 + 0.6, 1.5);
-        if (currLuma > maxSpecLuma) {
-            safeCurr *= maxSpecLuma / max(currLuma, 1e-6);
-        }
-    }
-
-    float maxHist = (mat.roughness < 0.08) ? 10.0 : SPECULAR_MAX_HISTORY;
-    float age = min(maxHist, oldAge + 1.0);
-    float alpha = 1.0 / max(age, 1.0);
-    float safeLuma = luma(safeCurr);
-    vec2 moments = mix(oldMom, vec2(safeLuma, safeLuma * safeLuma), alpha);
-    vec3 integrated = mix(oldSlow, safeCurr, alpha);
-    float stdDev = sqrt(max(moments.y - moments.x * moments.x, 0.0));
-
-    imageStore(specHistImg, px + currOff, roundHalf(vec4(integrated, age)));
-    imageStore(specMomImg,  px + currOff, vec4(moments, 0.0, 0.0));
-    imageStore(scratchImg,  px,           roundHalf(vec4(integrated, stdDev)));
+    imageStore(colorimg0, px, vec4(finalLit, 1.0));
 }

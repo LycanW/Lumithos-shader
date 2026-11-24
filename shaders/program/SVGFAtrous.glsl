@@ -36,10 +36,12 @@ void main() {
         return;
     }
 
-    GBufferMat mat = readGBuffer(px);
+    float rough;
+    bool isHand;
+    readGBufferRoughHand(px, rough, isHand);
     #ifdef ATROUS_SPECULAR
         bool isSpec = true;
-        if (mat.roughness > SPECULAR_ROUGH_CUTOFF || mat.isHand) {
+        if (rough > SPECULAR_ROUGH_CUTOFF || isHand) {
             #ifdef ATROUS_WRITE_COLORTEX4
                 imageStore(colorimg4, px, vec4(0.0));
             #else
@@ -51,8 +53,22 @@ void main() {
         bool isSpec = false;
     #endif
 
+    vec3 geoNormal, shadeNormal;
+    readGBufferNormals(px, geoNormal, shadeNormal);
+
     ivec2 srcOff = ivec2(ATROUS_SRC_TILE * res.x, 0);
     vec4 center = texelFetch(scratchTex, px + srcOff, 0);
+
+    // Pure flat mirrors pass through untouched (preserving hitDist in .a for virtual-depth TAA).
+    if (isSpec && rough < 0.08 && dot(shadeNormal, geoNormal) > 0.998) {
+        #ifdef ATROUS_WRITE_COLORTEX4
+            imageStore(colorimg4, px, roundHalf(center));
+        #else
+            imageStore(scratchImg, px + ivec2(ATROUS_DST_TILE * res.x, 0), roundHalf(center));
+        #endif
+        return;
+    }
+
     float centerLuma = luma(center.rgb);
 
     // 3x3 variance smoothing on pass 0 only.
@@ -79,7 +95,7 @@ void main() {
     vec3 centerWorld = viewToWorld(screenToView(vec3(uv, depth)));
 
     int stride = isSpec
-        ? max(1, int(round(float(1 << ATROUS_PASS) * (1.0 + 4.0 * mat.roughness))))
+        ? max(1, int(round(float(1 << ATROUS_PASS) * (1.0 + 4.0 * rough))))
         : (1 << ATROUS_PASS);
     const float k[2] = float[2](1.0, 0.5);
 
@@ -87,18 +103,8 @@ void main() {
     float sumVar = center.a * center.a;
     float sumW = 1.0;
 
-    // Pure flat mirrors pass through untouched (preserving hitDist in .a for virtual-depth TAA).
-    if (isSpec && mat.roughness < 0.08 && dot(mat.shadeNormal, mat.geoNormal) > 0.998) {
-        #ifdef ATROUS_WRITE_COLORTEX4
-            imageStore(colorimg4, px, roundHalf(center));
-        #else
-            imageStore(scratchImg, px + ivec2(ATROUS_DST_TILE * res.x, 0), roundHalf(center));
-        #endif
-        return;
-    }
-
     // Skip spatial blur on near-mirror specular so reflections remain razor-sharp.
-    bool runSpatial = !isSpec || mat.roughness > 0.14;
+    bool runSpatial = !isSpec || rough > 0.14;
     if (runSpatial) {
         for (int y = -1; y <= 1; ++y) {
             for (int x = -1; x <= 1; ++x) {
@@ -107,7 +113,7 @@ void main() {
                 if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
 
                 vec4 tap = texelFetch(scratchTex, q + srcOff, 0);
-                float wGeo = atrousWeight(centerWorld, mat.geoNormal, mat.shadeNormal, centerLuma, phiLuma, q, isSpec, mat.roughness);
+                float wGeo = atrousWeight(centerWorld, geoNormal, shadeNormal, centerLuma, phiLuma, q, isSpec, rough);
                 if (wGeo <= 1e-5) continue;
 
                 float wLuma = exp(-abs(centerLuma - luma(tap.rgb)) / phiLuma);
@@ -130,7 +136,7 @@ void main() {
         #ifdef ATROUS_SPECULAR
             ivec2 hPx = px + ivec2(currSide * res.x, 0);
             float age = imageLoad(specHistImg, hPx).a;
-            float fb = smoothstep(0.25, 0.55, mat.roughness) * smoothstep(8.0, 1.0, age) * 0.30;
+            float fb = smoothstep(0.25, 0.55, rough) * smoothstep(8.0, 1.0, age) * 0.30;
             if (fb > 0.01) {
                 imageStore(specHistImg, hPx, roundHalf(vec4(mix(center.rgb, outVal.rgb, fb), age)));
             }
