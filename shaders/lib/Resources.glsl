@@ -236,21 +236,24 @@ struct GBufferMat {
     float emission;
     float skyLight;
     float sss;
+    bool  isFoliage;
     float ao;
     bool  isHand;
 };
 
 // colortex1.r: albedoRGB8 | skyLight8
-// colortex1.g: rough8 | f0_8 | emit8 | isHand(1b) | sss(3b) | ao(4b)
-uvec2 packGBuffer0(vec3 albedoSrgb, float roughness, float f0, float emission, float skyLight, float sss, float ao, bool isHand) {
+// colortex1.g: rough8 | f0_8 | emit8 | isHand(1b) | sss+foliage(3b: 0=none, 1..3=solid SSS, 4..7=foliage SSS) | ao(4b)
+uvec2 packGBuffer0(vec3 albedoSrgb, float roughness, float f0, float emission, float skyLight, float sss, bool isFoliage, float ao, bool isHand) {
     uint w0 = packUnorm4x8(vec4(saturate(albedoSrgb), saturate(skyLight)));
     uint r8 = uint(round(saturate(roughness) * 255.0));
     uint f8 = uint(round(saturate(f0) * 255.0));
     uint e8 = uint(round(saturate(emission) * 255.0));
     uint fl = isHand ? 1u : 0u;
-    uint s3 = uint(round(saturate(sss) * 7.0)) & 7u;
+    uint s3 = isFoliage
+        ? (4u + uint(clamp(round(saturate(sss) * 3.0), 0.0, 3.0)))
+        : uint(clamp(round(saturate(sss) * 3.0), 0.0, 3.0));
     uint a4 = uint(round(saturate(ao) * 15.0)) & 15u;
-    uint w1 = r8 | (f8 << 8u) | (e8 << 16u) | (fl << 24u) | (s3 << 25u) | (a4 << 28u);
+    uint w1 = r8 | (f8 << 8u) | (e8 << 16u) | (fl << 24u) | ((s3 & 7u) << 25u) | (a4 << 28u);
     return uvec2(w0, w1);
 }
 
@@ -270,7 +273,9 @@ GBufferMat readGBuffer(ivec2 pixel) {
     m.f0          = float((g0.y >> 8u) & 255u) * (1.0 / 255.0);
     m.emission    = float((g0.y >> 16u) & 255u) * (1.0 / 255.0);
     m.isHand      = ((g0.y >> 24u) & 1u) != 0u;
-    m.sss         = float((g0.y >> 25u) & 7u) * (1.0 / 7.0);
+    uint s3       = (g0.y >> 25u) & 7u;
+    m.isFoliage   = (s3 >= 4u);
+    m.sss         = m.isFoliage ? (float(s3 - 3u) * 0.25) : (float(s3) * (1.0 / 3.0));
     m.ao          = float((g0.y >> 28u) & 15u) * (1.0 / 15.0);
     m.geoNormal   = unpackNormal16(g1 & 65535u);
     m.shadeNormal = unpackNormal16(g1 >> 16u);

@@ -1,4 +1,5 @@
 screen.PATH_TRACING=Path Tracing
+screen.WATER=Water Optics
 screen.POST_PROCESSING=Color & Post-Processing
 screen.DEBUG=Debug View
 option.DIFFUSE_TRACE_RES=Diffuse Tracing Resolution
@@ -20,6 +21,9 @@ option.AUTO_EXPOSURE=Auto Exposure
 option.EXPOSURE=Exposure Compensation
 option.BLOOM_ENABLED=Physical Bloom
 option.BLOOM_STRENGTH=Bloom Strength
+option.WATER_PARALLAX=3D Wave Parallax
+option.WATER_CAUSTICS=Chromatic Underwater Caustics
+option.WAVE_STRENGTH=Wave Strength
 option.DEBUG_VIEW=Debug View
 value.DEBUG_VIEW.0=Off
 value.DEBUG_VIEW.1=Raw Diffuse GI
@@ -27,3 +31,4 @@ value.DEBUG_VIEW.2=Denoised Diffuse GI
 value.DEBUG_VIEW.3=Specular Reflection
 value.DEBUG_VIEW.4=L1 SH Radiance Cache
 value.DEBUG_VIEW.5=Hybrid Geometry (Green=6-Face Red=Quad/Tri)
+value.DEBUG_VIEW.6=Light Breakdown (R=Direct G=SpecGI B=DiffGI+SSS)

@@ -4,6 +4,8 @@
 // Planar Mirror Virtual Reprojection, and Geometry-Aware Disocclusion Reset.
 // Ping-pong taaHistImg (2x1 tiles) lets final.fsh read directly — zero copy pass!
 #include "/lib/SVGF.glsl"
+#include "/lib/SkyShadow.glsl"
+#include "/lib/Water.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 const vec2 workGroupsRender = vec2(1.0, 1.0);
@@ -18,9 +20,9 @@ const float TAA_MAX_FRAMES  = 32.0;
 const float TAA_CLIP_GAMMA  = 2.0;
 const float TAA_ANTIFLICKER = 0.25;
 
-// Resolve translucent layers over the opaque scene: bg(refracted) * T + L.
-// Refraction only samples background pixels that lie behind the translucent surface (no foreground leaks).
-vec3 fetchSceneColor(ivec2 q, ivec2 res) {
+// Resolve translucent layers over the opaque scene: bg(refracted) * T + L,
+// plus true submerged underwater volume fog when camera is inside water (without double-fogging Snell's window!).
+vec3 fetchSceneColor(ivec2 q, ivec2 res, vec3 uwLightDir, vec3 uwDirectCol, vec3 uwSkyUp) {
     vec3 bg = texelFetch(colortex0, q, 0).rgb;
     vec3 T  = texelFetch(colortex7, q, 0).rgb;
     vec3 L  = texelFetch(colortex6, q, 0).rgb;
@@ -34,6 +36,23 @@ vec3 fetchSceneColor(ivec2 q, ivec2 res) {
             }
         }
         bg = bg * T + L;
+    } else if (isEyeInWater == 1) {
+        vec2 qUV = (vec2(q) + 0.5) * texelSize();
+        float d1 = texelFetch(depthtex1, q, 0).r;
+        vec3 worldDir;
+        float waterDist;
+        if (d1 >= 0.999999) {
+            worldDir = normalize(mat3(gbufferModelViewInverse) * screenToView(vec3(qUV, 1.0)));
+            waterDist = 48.0;
+        } else {
+            vec3 vp = screenToView(vec3(qUV, d1));
+            waterDist = length(vp);
+            worldDir = normalize(mat3(gbufferModelViewInverse) * vp);
+        }
+        vec3 Tvol, inscatter;
+        evalWaterVolume(waterDist, worldDir, vec3(0.0, 1.0, 0.0), uwLightDir, uwDirectCol,
+                        vec3(1.0), uwSkyUp, 1.0, vec3(0.20, 0.55, 0.85), true, Tvol, inscatter);
+        bg = bg * Tvol + inscatter;
     }
     bg = max(bg, vec3(0.0));
     if (any(isnan(bg)) || any(isinf(bg))) bg = vec3(0.0);
@@ -50,9 +69,13 @@ void main() {
     ivec2 currOff = ivec2(currSide * res.x, 0);
     ivec2 prevOff = ivec2(prevSide * res.x, 0);
 
-    vec3 curr = fetchSceneColor(px, res);
+    vec3 uwLightDir  = (isEyeInWater == 1) ? getShadowLightDir() : vec3(0.0, 1.0, 0.0);
+    vec3 uwDirectCol = (isEyeInWater == 1) ? getDirectLightColor() : vec3(0.0);
+    vec3 uwSkyUp     = (isEyeInWater == 1) ? evalSky(vec3(0.0, 1.0, 0.0), false) : vec3(0.0);
 
-    #if !defined(TAA_ENABLED) || DEBUG_VIEW == 1 || DEBUG_VIEW == 5
+    vec3 curr = fetchSceneColor(px, res, uwLightDir, uwDirectCol, uwSkyUp);
+
+    #if !defined(TAA_ENABLED) || DEBUG_VIEW == 1 || DEBUG_VIEW == 5 || DEBUG_VIEW == 6
         imageStore(taaHistImg, px + currOff, roundHalf(vec4(curr, 1.0)));
         return;
     #endif
@@ -145,7 +168,7 @@ void main() {
                 for (int x = -1; x <= 1; ++x) {
                     if (x == 0 && y == 0) continue;
                     ivec2 q = clamp(px + ivec2(x, y), ivec2(0), res - 1);
-                    vec3 s = rgbToYCoCg(fetchSceneColor(q, res));
+                    vec3 s = rgbToYCoCg(fetchSceneColor(q, res, uwLightDir, uwDirectCol, uwSkyUp));
                     m1 += s;
                     m2 += s * s;
                 }

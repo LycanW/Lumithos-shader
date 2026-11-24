@@ -17,12 +17,14 @@ float luma(vec3 c)      { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 vec3 srgbToLinear(vec3 c) { return pow(max(c, vec3(0.0)), vec3(2.2)); }
 vec3 linearToSrgb(vec3 c) { return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2)); }
 
-// Coefficients per block. Biome tint affects absorption; scattering is achromatic.
-const float WATER_SCATTERING = 0.007;
-
-vec3 waterExtinction(vec3 biomeColor) {
-    vec3 absorption = vec3(0.033, 0.011, 0.004) - 0.04 * log(clamp(biomeColor, vec3(0.08), vec3(1.0)));
-    return absorption + WATER_SCATTERING;
+// Clear-water Beer-Lambert extinction per block (natural log units for exp(-sigma * d)):
+// Shallow water stays crystal clear, mid-depth glows turquoise-emerald, deep water turns rich sapphire.
+// Gently tinted by biome water color so warm oceans and swamps keep character without turning murky.
+vec3 waterExtinction(vec3 biomeSrgb) {
+    vec3 biomeLin = srgbToLinear(clamp(biomeSrgb, vec3(0.04), vec3(1.0)));
+    vec3 biomeChroma = biomeLin / max(maxOf(biomeLin), 1e-3);
+    vec3 attenLog2 = vec3(0.35, 0.13, 0.11) + (-log2(max(biomeChroma, vec3(0.15)))) * 0.035;
+    return attenLog2 * 0.69314718;
 }
 
 // ---- Stained-Glass / Translucent Light Tinting & Colored Emitters ----

@@ -4,6 +4,7 @@
 // and publish prevGuideImg (exact float32 integers!) + diffuse-safe colortex5 (lit history).
 #include "/lib/SkyShadow.glsl"
 #include "/lib/RadianceCache.glsl"
+#include "/lib/Water.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 const vec2 workGroupsRender = vec2(1.0, 1.0);
@@ -129,7 +130,7 @@ void evalHeldHandLight(int lightVal, int itemId, vec3 handViewPos, GBufferMat ma
     vec3 L = normalize(mat3(gbufferModelViewInverse) * viewLightDir);
     float NdotL = max(dot(mat.shadeNormal, L), 0.0);
     float geoHorizon = smoothstep(0.0, 0.08, dot(mat.geoNormal, L));
-    float backNL = (mat.sss > 0.0 && !mat.isHand) ? max(dot(-mat.geoNormal, L), 0.0) : 0.0;
+    float backNL = (mat.isFoliage && !mat.isHand) ? max(dot(-mat.geoNormal, L), 0.0) : 0.0;
     if ((NdotL <= 0.0 || geoHorizon <= 0.0) && backNL <= 0.0) return;
 
     float rNorm = dist / maxRange;
@@ -298,33 +299,45 @@ void main() {
     if (NdotL > 0.0 && geoHorizon > 0.0 && maxOf(directCol) > 1e-4) {
         vec2 shNoise = stbn2D(px, mat.isHand ? 0 : frameCounter, 7u);
         float shadowCoverage = 0.0;
-        vec3 smVis = sampleShadowPCSS(worldPos, mat.geoNormal, shNoise.x, shadowCoverage);
+        float waterPath = 0.0;
+        vec3 smVis = sampleShadowPCSS(worldPos, mat.geoNormal, shNoise.x, shadowCoverage, waterPath);
 
         float ssSun = 1.0;
         if (!mat.isHand && (shadowCoverage < 0.99 || maxOf(smVis) > 0.01)) {
             vec3 viewGeoN = normalize(mat3(gbufferModelView) * mat.geoNormal);
             vec3 viewLightDir = normalize(mat3(gbufferModelView) * lightDir);
-            ssSun = traceSunScreenSpaceShadow(viewPos, viewGeoN, viewLightDir, shadowCoverage, mat.isHand, mat.sss > 0.1, shNoise.y);
+            ssSun = traceSunScreenSpaceShadow(viewPos, viewGeoN, viewLightDir, shadowCoverage, mat.isHand, mat.isFoliage, shNoise.y);
         }
 
         vec3 distantVis = vec3(smoothstep(0.42, 0.94, mat.skyLight) * ssSun);
         vec3 nearVis    = smVis * ssSun;
         shadowVis = mix(distantVis, nearVis, shadowCoverage) * geoHorizon;
+
+        // Projected chromatic underwater caustics on sunlit submerged geometry (both above-water & underwater views).
+        if (!mat.isHand && waterPath > 0.02 && maxOf(shadowVis) > 1e-4) {
+            vec3 absPos = worldPos + cameraPositionFract + vec3(cameraPositionInt % 4096);
+            vec3 caustics = evalWaterCaustics(absPos, lightDir, waterPath);
+            shadowVis *= mix(vec3(1.0), caustics, shadowCoverage);
+        }
     }
     vec3 directDiffuse = mat.albedo * INV_PI * directCol * (NdotL * shadowVis);
 
-    // LabPBR 1.3 subsurface scattering (thin-slab back-lit transmission, Henyey-Greenstein forward lobe).
-    // Offsets along lightDir to step cleanly through single-block leaves/vines without noisy self-shadow speckle.
+    // Physical LabPBR 1.3 subsurface scattering via Beer-Lambert shadow-map optical thickness:
+    // - Thin foliage/plants (leaves, grass, vines) transmit lush dappled backlight through canopies.
+    // - Solid mineral/wax/ice SSS (quartz, marble, snow, candles) stays strictly airtight through
+    //   1-block-thick walls (zero corridor light leaks & zero grazing stripes!) while glowing softly at thin edges.
     vec3 sssLight = vec3(0.0);
-    if (mat.sss > 0.0 && maxOf(directCol) > 1e-4) {
+    if (mat.sss > 0.0 && !mat.isHand && maxOf(directCol) > 1e-4) {
         float backNL = dot(-mat.geoNormal, lightDir);
         if (backNL > 0.0) {
-            vec3 transVis = sampleShadowFastRay(worldPos + lightDir * 0.45, lightDir, -lightDir);
+            float sssNoise = stbn2D(px, frameCounter, 8u).x;
+            vec3 transVis = evalShadowSSS(worldPos, mat.geoNormal, lightDir, mat.isFoliage, sssNoise);
             float mu = dot(-viewDir, lightDir);
             const float g = 0.55;
             float hg = (1.0 - g * g) / (4.0 * PI * pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5));
             float phase = 0.35 * INV_PI + 0.65 * hg;
-            sssLight = mat.albedo * mat.albedo * directCol * transVis * (mat.sss * phase * saturate(backNL + 0.25));
+            float backWeight = mat.isFoliage ? saturate(backNL + 0.25) : saturate(backNL);
+            sssLight = mat.albedo * mat.albedo * directCol * transVis * (mat.sss * phase * backWeight);
         }
     }
 
@@ -410,6 +423,12 @@ void main() {
             }
         }
         finalLit = dbg;
+    #elif DEBUG_VIEW == 6
+        finalLit = saturate(vec3(
+            luma(directDiffuse * kD_direct + directSpec) * 2.5,
+            luma(specEnv * envBrdf * specOcc) * 4.0,
+            luma((diffuseGI * mat.albedo) * (kD_env * mat.ao) + sssLight * kD_direct) * 2.5
+        ));
     #endif
 
     imageStore(colorimg0, px, vec4(finalLit, 1.0));

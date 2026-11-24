@@ -42,7 +42,10 @@
 #define BLOOM_ENABLED
 #define BLOOM_STRENGTH 0.06 // [0.02 0.04 0.06 0.08 0.12 0.16]
 #define EXPOSURE 1.0 // [0.25 0.5 0.75 1.0 1.25 1.5 2.0 3.0]
-#define DEBUG_VIEW 0 // [0 1 2 3 4 5]
+#define WATER_PARALLAX
+#define WATER_CAUSTICS
+#define WAVE_STRENGTH 1.0 // [0.25 0.5 0.75 1.0 1.25 1.5 2.0]
+#define DEBUG_VIEW 0 // [0 1 2 3 4 5 6]
 
 // ---- Lighting & Tracing Tuning ----
 #define DIFFUSE_MAX_STEPS     64

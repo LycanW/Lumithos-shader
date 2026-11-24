@@ -47,7 +47,7 @@ void main() {
     vec3 hdr = max(texelFetch(taaHistTex, px + currOff, 0).rgb, vec3(0.0));
     if (any(isnan(hdr)) || any(isinf(hdr))) hdr = vec3(0.0);
 
-    #if DEBUG_VIEW == 5
+    #if DEBUG_VIEW == 5 || DEBUG_VIEW == 6
         vec3 ldr = hdr;
     #elif DEBUG_VIEW != 0
         vec3 ldr = applyTonemap(hdr * float(EXPOSURE));

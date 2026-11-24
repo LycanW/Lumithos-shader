@@ -209,20 +209,13 @@ void main() {
 
     vec3 cMin = min(vShadowClip[0].xyz, min(vShadowClip[1].xyz, vShadowClip[2].xyz));
     vec3 cMax = max(vShadowClip[0].xyz, max(vShadowClip[1].xyz, vShadowClip[2].xyz));
-    if (cMax.x < -1.05 || cMin.x > 1.05 || cMax.y < -1.05 || cMin.y > 1.05 || cMax.z < -1.0 || cMin.z > 1.0) {
+    if (cMax.x < -1.05 || cMin.x > 1.05 || cMax.y < -1.05 || cMin.y > 1.05) {
         return;
     }
 
-    // Cull sun-backfacing TERRAIN_SOLID triangles BEFORE EmitVertex() (~50% less GS vertex output!).
-    // Matches OpenGL's hardware GL_BACK culling identically while preserving full 360° voxelization above.
-    if (renderStage == MC_RENDER_STAGE_TERRAIN_SOLID) {
-        vec2 sc1 = vShadowClip[1].xy - vShadowClip[0].xy;
-        vec2 sc2 = vShadowClip[2].xy - vShadowClip[0].xy;
-        if (sc1.x * sc2.y - sc1.y * sc2.x <= 0.0) {
-            return;
-        }
-    }
-
+    // Keep both front-facing and back-facing geometry in the shadow map (matching Iris's
+    // double-sided shadow pass) so 1-block-thick walls, ceilings, stairs, slabs, and
+    // corners are 100% airtight with zero light leaks.
     int needTex = (renderStage != MC_RENDER_STAGE_TERRAIN_SOLID) ? 1 : 0;
     for (int i = 0; i < 3; ++i) {
         gl_Position = vShadowClip[i];

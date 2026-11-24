@@ -135,7 +135,7 @@
             emission = vBlockEmit * texMask;
         }
 
-        gbuf0Out = packGBuffer0(albedoSrgb, roughness, f0, emission, vSkyLight, sss, matAO, isHand);
+        gbuf0Out = packGBuffer0(albedoSrgb, roughness, f0, emission, vSkyLight, sss, vIsFoliage > 0.5, matAO, isHand);
         gbuf1Out = packGBuffer1(geoNormal, shadeNormal);
     }
 #endif

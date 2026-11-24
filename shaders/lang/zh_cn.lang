@@ -1,4 +1,5 @@
 screen.PATH_TRACING=路径追踪
+screen.WATER=水体光学
 screen.POST_PROCESSING=色彩管理与后处理
 screen.DEBUG=调试视图
 option.DIFFUSE_TRACE_RES=漫反射追踪分辨率
@@ -20,6 +21,9 @@ option.AUTO_EXPOSURE=自动曝光 (Auto Exposure)
 option.EXPOSURE=曝光补偿
 option.BLOOM_ENABLED=物理辉光 (Bloom)
 option.BLOOM_STRENGTH=辉光强度
+option.WATER_PARALLAX=三维水波视差 (Wave Parallax)
+option.WATER_CAUSTICS=水底色散焦散 (Caustics)
+option.WAVE_STRENGTH=波浪强度
 option.DEBUG_VIEW=调试视图
 value.DEBUG_VIEW.0=关闭
 value.DEBUG_VIEW.1=原始漫反射 GI
@@ -27,3 +31,4 @@ value.DEBUG_VIEW.2=降噪后漫反射 GI
 value.DEBUG_VIEW.3=镜面反射
 value.DEBUG_VIEW.4=L1 SH 辐射度缓存
 value.DEBUG_VIEW.5=体素双轨覆盖 (绿=六面快轨 红=非立方图元)
+value.DEBUG_VIEW.6=光照分量诊断 (红=直射阳光 绿=镜面反射 蓝=漫反射GI+SSS)
