@@ -45,11 +45,14 @@ void main() {
     ));
 
     // Direct Sunlight / Moonlight (4-tap blue-noise-rotated colored PCF on Shadow Map)
+    // Smooth grazing-horizon fade on geoNormal prevents normal-map bumps from binary-flashing
+    // when sunlight skims parallel to a wall (dot(geoNormal, lightDir) ≈ 0).
     vec3 lightDir = getShadowLightDir();
     vec3 directCol = getDirectLightColor();
     float NdotL = max(dot(mat.shadeNormal, lightDir), 0.0);
-    vec3 shadowVis = (NdotL > 0.0 && dot(mat.geoNormal, lightDir) > 0.0 && maxOf(directCol) > 1e-4)
-        ? sampleShadowPCF(worldPos, mat.geoNormal, stbn2D(px, frameCounter, 7u).x)
+    float geoHorizon = smoothstep(0.0, 0.08, dot(mat.geoNormal, lightDir));
+    vec3 shadowVis = (NdotL > 0.0 && geoHorizon > 0.0 && maxOf(directCol) > 1e-4)
+        ? sampleShadowPCF(worldPos, mat.geoNormal, stbn2D(px, frameCounter, 7u).x) * geoHorizon
         : vec3(0.0);
     vec3 directDiffuse = mat.albedo * INV_PI * directCol * (NdotL * shadowVis);
 
