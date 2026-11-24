@@ -14,6 +14,7 @@ uniform float near;
 uniform float far;
 uniform float rainStrength;
 uniform float wetness;
+uniform int   isEyeInWater;
 uniform float sunAngle;
 uniform float shadowAngle;
 uniform int   worldTime;
@@ -235,16 +236,22 @@ struct GBufferMat {
     float f0;
     float emission;
     float skyLight;
+    float sss;
+    float ao;
     bool  isHand;
 };
 
-uvec2 packGBuffer0(vec3 albedoSrgb, float roughness, float f0, float emission, float skyLight, bool isHand) {
+// colortex1.r: albedoRGB8 | skyLight8
+// colortex1.g: rough8 | f0_8 | emit8 | isHand(1b) | sss(3b) | ao(4b)
+uvec2 packGBuffer0(vec3 albedoSrgb, float roughness, float f0, float emission, float skyLight, float sss, float ao, bool isHand) {
     uint w0 = packUnorm4x8(vec4(saturate(albedoSrgb), saturate(skyLight)));
     uint r8 = uint(round(saturate(roughness) * 255.0));
     uint f8 = uint(round(saturate(f0) * 255.0));
     uint e8 = uint(round(saturate(emission) * 255.0));
     uint fl = isHand ? 1u : 0u;
-    uint w1 = r8 | (f8 << 8u) | (e8 << 16u) | (fl << 24u);
+    uint s3 = uint(round(saturate(sss) * 7.0)) & 7u;
+    uint a4 = uint(round(saturate(ao) * 15.0)) & 15u;
+    uint w1 = r8 | (f8 << 8u) | (e8 << 16u) | (fl << 24u) | (s3 << 25u) | (a4 << 28u);
     return uvec2(w0, w1);
 }
 
@@ -264,6 +271,8 @@ GBufferMat readGBuffer(ivec2 pixel) {
     m.f0          = float((g0.y >> 8u) & 255u) * (1.0 / 255.0);
     m.emission    = float((g0.y >> 16u) & 255u) * (1.0 / 255.0);
     m.isHand      = ((g0.y >> 24u) & 1u) != 0u;
+    m.sss         = float((g0.y >> 25u) & 7u) * (1.0 / 7.0);
+    m.ao          = float((g0.y >> 28u) & 15u) * (1.0 / 15.0);
     m.geoNormal   = unpackNormal16(g1 & 65535u);
     m.shadeNormal = unpackNormal16(g1 >> 16u);
     return m;
@@ -289,12 +298,22 @@ void readGBufferSpecMask(ivec2 pixel, out float roughness, out float f0, out boo
     isHand    = ((w1 >> 24u) & 1u) != 0u;
 }
 
-// ---- LabPBR 1.3 Specular Decode ----
-// Stores perceptual roughness (1 - smoothness) so GGX squares it ONCE (alpha = r^2),
-// and preserves raw f0 byte (0..255) so hardcoded/albedo-tinted metals keep full RGB F0.
-void decodeLabPBR(vec4 specTex, out float perceptualRoughness, out float f0Raw, out float emission) {
+// ---- Full LabPBR 1.3 Specular Decode ----
+// R: perceptual smoothness -> perceptualRoughness = 1 - R (GGX squares once: alpha = r^2)
+// G: raw F0 byte (0..229 dielectric, 230..237 hardcoded metals, 238..255 albedo-tinted metal)
+// B: 0..64 porosity [0..1], 65..255 subsurface scattering [0..1]
+// A: 1..254 emission [0..1], 0 & 255 = none
+void decodeLabPBR(vec4 specTex, out float perceptualRoughness, out float f0Raw, out float porosity, out float sss, out float emission) {
     perceptualRoughness = saturate(1.0 - specTex.r);
     f0Raw = saturate(specTex.g);
+    int bCode = int(round(saturate(specTex.b) * 255.0));
+    if (bCode <= 64) {
+        porosity = float(bCode) * (1.0 / 64.0);
+        sss = 0.0;
+    } else {
+        porosity = 0.0;
+        sss = float(bCode - 65) * (1.0 / 190.0);
+    }
     emission = (specTex.a > (0.5 / 255.0) && specTex.a < (254.5 / 255.0)) ? specTex.a : 0.0;
 }
 

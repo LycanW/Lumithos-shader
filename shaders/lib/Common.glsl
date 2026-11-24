@@ -17,9 +17,14 @@ float luma(vec3 c)      { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 vec3 srgbToLinear(vec3 c) { return pow(max(c, vec3(0.0)), vec3(2.2)); }
 vec3 linearToSrgb(vec3 c) { return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2)); }
 
+// Extinction per block. Biome color modulates the absorption spectrum over several blocks.
+vec3 waterExtinction(vec3 biomeColor) {
+    return vec3(0.045, 0.023, 0.016) - 0.04 * log(clamp(biomeColor, vec3(0.08), vec3(1.0)));
+}
+
 // ---- Stained-Glass / Translucent Light Tinting & Colored Emitters ----
 // Physical translucent filter transmittance: keeps white glass clear, black/tinted glass dark,
-// and delivers rich chromatic tinting for single- or multi-layer stained glass & water.
+// and delivers rich chromatic tinting for single- or multi-layer stained glass.
 vec3 evalGlassTransmittance(vec3 srgbCol, float alpha) {
     vec3 lin = srgbToLinear(saturate(srgbCol));
     float maxC = maxOf(lin);

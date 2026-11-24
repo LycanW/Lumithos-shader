@@ -2,10 +2,8 @@
 
 // Pass: Specular Reflection (1 SPP GGX VNDF + 24-step SSR + Hybrid 6-Face/Non-Cube Raytrace)
 #define TRACE_HIGH_PRIM_GUARD
-#include "/lib/Raytrace.glsl"
-#include "/lib/SkyShadow.glsl"
+#include "/lib/SpecularTrace.glsl"
 #include "/lib/ScreenTrace.glsl"
-#include "/lib/RadianceCache.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 #ifdef SPECULAR_CHECKERBOARD
@@ -30,13 +28,8 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
     float camDist  = length(eyeToSurf);
     vec3 viewDir   = -eyeToSurf / max(camDist, 1e-4); // toward actual bobbed camera eye in world space
 
-    vec3 H = shadeNormal;
-    vec3 rayDir;
-    if (roughness < 0.08) {
-        rayDir = reflect(-viewDir, shadeNormal);
-    } else {
-        rayDir = sampleGGXVNDF(viewDir, shadeNormal, roughness, stbn2D(bnPx, frameCounter, 2u), H);
-    }
+    vec3 H;
+    vec3 rayDir = sampleReflectionDirection(viewDir, shadeNormal, roughness, bnPx, H);
 
     // Physical Heitz VNDF microfacet horizon test: rays reflected below the surface are self-occluded
     // (weight = 0), NEVER replaced with a fake mirror reflection!
@@ -82,32 +75,7 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
 
     if (!ssrHit) {
         vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, geoNormal, viewDir, camDist);
-        // Full-res atlas LOD 0 for razor-sharp mirror reflections of 6-face & rotated block textures!
-        float specLod = roughness < 0.25 ? 0.0 : 1.0;
-        int maxSpecSteps = roughness < 0.22 ? SPECULAR_MAX_STEPS : 48;
-        TraceHit hit = traceScene(rayOrig, rayDir, maxSpecSteps, specLod, true);
-        if (hit.hit) {
-            hitDist = hit.dist;
-            radiance += hit.emitColor * (hit.emission * EMISSIVE_SCALE);
-
-            vec3 lightDir = getShadowLightDir();
-            float hitNdotL = max(dot(hit.normal, lightDir), 0.0);
-            if (hitNdotL > 0.0) {
-                vec3 vis = sampleShadowFastRay(hit.worldPos, hit.normal, rayDir);
-                radiance += hit.albedo * INV_PI * getDirectLightColor() * (hitNdotL * vis);
-            }
-
-            vec3 skyAmb = evalSky(hit.normal, false) * (0.15 + 0.85 * hit.skyLight);
-            vec3 bounce = (roughness < 0.25)
-                ? queryRadianceCacheSmooth(hit.worldPos, hit.normal, skyAmb, 0u, stbn2D(bnPx, frameCounter, 6u))
-                : queryRadianceCacheStochastic(hit.worldPos, hit.normal, 0u, stbn2D(bnPx, frameCounter, 6u));
-            radiance += hit.albedo * bounce * 0.85;
-            radiance *= hit.throughput;
-        } else if (hit.exitedGrid) {
-            radiance = evalSky(rayDir, true) * hit.throughput;
-        } else {
-            radiance = queryRadianceCache(hit.worldPos, -rayDir, 0u, false) * hit.throughput;
-        }
+        radiance = traceVoxelReflection(rayOrig, rayDir, roughness, bnPx, SPECULAR_MAX_STEPS, true, hitDist);
     }
 
     radiance *= brdfRatio;

@@ -19,10 +19,12 @@ in vec4  vColor[3];
 in float vSkyLight[3];
 in float vEmissive[3];
 in vec4  vShadowClip[3];
+flat in int vIsWater[3];
 
 out vec2 gTexCoord;
 out vec4 gColor;
 flat out int gNeedTex;
+flat out int gIsWater;
 
 void writeTintAndSky(uint slot, vec3 avgColor, float avgSky, bool isTinted, uint emissive4) {
     uint packedTint = packTintAndSky(isTinted ? avgColor : vec3(1.0), avgSky);
@@ -45,7 +47,7 @@ void registerEmissiveVoxel(uint slot, ivec3 vCoord, uint emissive4) {
     }
 }
 
-void voxelizeTerrainTriangle() {
+void voxelizeTerrainTriangle(bool isWater) {
     vec3 vp0 = vVoxelPos[0];
     vec3 vp1 = vVoxelPos[1];
     vec3 vp2 = vVoxelPos[2];
@@ -78,7 +80,8 @@ void voxelizeTerrainTriangle() {
     uint faceIdx  = normalToFaceIndex(faceNormal);
     vec3 localSum = vec3(0.0);
 
-    if (inVoxelBounds(vCoord) && maxOf(abs(faceNormal)) > 0.999) {
+    // Keep water on Track 2 even for flat faces so its material tag and biome tint are per triangle.
+    if (!isWater && inVoxelBounds(vCoord) && maxOf(abs(faceNormal)) > 0.999) {
         vec3 local0 = vp0 - vec3(vCoord);
         vec3 local1 = vp1 - vec3(vCoord);
         vec3 local2 = vp2 - vec3(vCoord);
@@ -175,8 +178,10 @@ void voxelizeTerrainTriangle() {
 
                 uint slot = voxelLinearIndex(c);
                 imageStore(voxelGridImg, c, uvec4(1u));
-                writeTintAndSky(slot, avgColor, avgSky, isTinted, emissive4);
-                registerEmissiveVoxel(slot, c, emissive4);
+                if (!isWater) {
+                    writeTintAndSky(slot, avgColor, avgSky, isTinted, emissive4);
+                    registerEmissiveVoxel(slot, c, emissive4);
+                }
 
                 uint pIdx = atomicAdd(primPool.primCount, 1u);
                 if (pIdx >= MAX_PRIMITIVES) return;
@@ -185,7 +190,7 @@ void voxelizeTerrainTriangle() {
                 primPool.prims[pIdx] = packScenePrim(
                     local0, e1, e2,
                     vTexCoord[0], vTexCoord[1], vTexCoord[2],
-                    avgColor, emissive4, isTranslucent, prevHead
+                    avgColor, emissive4, isTranslucent, isWater, prevHead
                 );
             }
         }
@@ -197,8 +202,9 @@ void main() {
                   || (renderStage == MC_RENDER_STAGE_TERRAIN_CUTOUT)
                   || (renderStage == MC_RENDER_STAGE_TERRAIN_CUTOUT_MIPPED)
                   || (renderStage == MC_RENDER_STAGE_TERRAIN_TRANSLUCENT);
+    bool isWater = renderStage == MC_RENDER_STAGE_TERRAIN_TRANSLUCENT && vIsWater[0] != 0;
     if (isTerrain) {
-        voxelizeTerrainTriangle();
+        voxelizeTerrainTriangle(isWater);
     }
 
     vec3 cMin = min(vShadowClip[0].xyz, min(vShadowClip[1].xyz, vShadowClip[2].xyz));
@@ -223,6 +229,7 @@ void main() {
         gTexCoord   = vTexCoord[i];
         gColor      = vColor[i];
         gNeedTex    = needTex;
+        gIsWater    = int(isWater);
         EmitVertex();
     }
     EndPrimitive();

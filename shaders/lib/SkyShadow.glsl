@@ -59,14 +59,14 @@ vec3 getDirectLightColor() {
 
 // Single-transform shadow-screen helper: computes undistorted clip once to derive exact
 // local distorted texel size, then applies linear clip-space normal/pullback offset (saves 50% mat4 ALU!).
-vec3 worldToShadowScreenBiased(vec3 worldPos, vec3 normal, vec3 pullbackDir, float normalTexelMul, float minOff, float maxOff) {
+vec3 worldToShadowScreenBiased(vec3 worldPos, vec3 normal, vec3 pullbackDir, float normalTexelMul, float minOff, float maxOff, out float outTexelWorld) {
     mat3 smRot = mat3(shadowModelView);
     vec3 svPos = (shadowModelView * vec4(worldPos, 1.0)).xyz;
     vec3 rawClip = (shadowProjection * vec4(svPos, 1.0)).xyz;
     float factor = shadowDistortFactor(rawClip.xy);
     float baseTexel = (2.0 * shadowDistance) / float(shadowMapResolution);
-    float texelWorld = baseTexel * (factor * factor / 0.15);
-    float normalOffset = clamp(texelWorld * normalTexelMul, minOff, maxOff);
+    outTexelWorld = baseTexel * (factor * factor / 0.15);
+    float normalOffset = clamp(outTexelWorld * normalTexelMul, minOff, maxOff);
 
     vec3 worldBias = normal * normalOffset + pullbackDir * 0.008;
     vec3 clipBias  = mat3(shadowProjection) * (smRot * worldBias);
@@ -89,6 +89,10 @@ vec3 evalShadowTapColored(vec2 uv, float zRef) {
     float dAll = textureLod(shadowtex0, uv, 0.0).r;
     if (zRef > dAll) {
         vec4 sc = textureLod(shadowcolor0, uv, 0.0);
+        if (sc.a < 0.05) {
+            float waterPath = min((zRef - dAll) / max(shadowScreenZPerBlock(), 1e-6), 64.0);
+            return pow(sc.rgb, vec3(waterPath));
+        }
         return evalGlassTransmittance(sc.rgb, sc.a);
     }
     return vec3(1.0);
@@ -100,7 +104,8 @@ vec3 sampleShadowFastRay(vec3 worldPos, vec3 normal, vec3 inRayDir) {
     float NdotL = dot(normal, lightDir);
     if (NdotL <= 0.0) return vec3(0.0);
 
-    vec3 sp = worldToShadowScreenBiased(worldPos, normal, -inRayDir, 1.25, 0.014, 0.25);
+    float texelWorld;
+    vec3 sp = worldToShadowScreenBiased(worldPos, normal, -inRayDir, 1.25, 0.014, 0.25, texelWorld);
     if (any(lessThan(sp, vec3(0.0))) || any(greaterThan(sp, vec3(1.0)))) return vec3(1.0);
 
     float bias = max(0.015 * shadowScreenZPerBlock(), 2.0e-5);
@@ -111,10 +116,11 @@ vec3 sampleShadowFast(vec3 worldPos, vec3 normal) {
     return sampleShadowFastRay(worldPos, normal, vec3(0.0));
 }
 
-// Soft 4-tap jittered PCF colored shadow for primary direct lighting.
-// Uses spatiotemporal blue-noise rotation (Heitz 2019) so soft shadow penumbra errors stay
-// strictly high-frequency for TAA/denoising without low-frequency blotches.
-vec3 sampleShadowPCF(vec3 worldPos, vec3 normal, float blueNoise01) {
+// Contact-Hardening Blue-Noise PCSS (8-tap Vogel Blocker Search + 12-tap Variable-Penumbra Colored PCF)
+// - Razor-sharp shadows at contact points, physically softening with blocker distance.
+// - Lossless early-out when 0 blockers are found (fast in open sunlight!).
+// - Smooth shadow-map border fade (no hard 128-block shadow box edge).
+vec3 sampleShadowPCSS(vec3 worldPos, vec3 normal, float blueNoise01) {
     vec3 lightDir = getShadowLightDir();
     float NdotL = dot(normal, lightDir);
     if (NdotL <= 0.0) return vec3(0.0);
@@ -122,24 +128,62 @@ vec3 sampleShadowPCF(vec3 worldPos, vec3 normal, float blueNoise01) {
     vec3 eyeToSurf = worldPos - gbufferModelViewInverse[3].xyz;
     float dist = length(eyeToSurf);
     vec3 toCam = -eyeToSurf / max(dist, 1e-4);
-    vec3 sp = worldToShadowScreenBiased(worldPos, normal, toCam, 1.65, 0.018, 0.30);
+    float texelWorld;
+    vec3 sp = worldToShadowScreenBiased(worldPos, normal, toCam, 1.65, 0.018, 0.30, texelWorld);
     if (any(lessThan(sp, vec3(0.0))) || any(greaterThan(sp, vec3(1.0)))) return vec3(1.0);
 
-    float bias = max(0.015 * shadowScreenZPerBlock(), 2.0e-5);
-    float invRes = 1.0 / float(shadowMapResolution);
-    float angle = TWO_PI * blueNoise01;
-    mat2 rot = mat2(cos(angle), sin(angle), -sin(angle), cos(angle));
+    float edgeDist = max(abs(sp.x - 0.5), abs(sp.y - 0.5));
+    float borderFade = smoothstep(0.50, 0.45, edgeDist);
+    if (borderFade <= 1e-4) return vec3(1.0);
 
-    const vec2 offsets[4] = vec2[4](
-        vec2(-0.7, -0.3), vec2(0.7, 0.3),
-        vec2(-0.3,  0.7), vec2(0.3, -0.7)
-    );
-    vec3 sum = vec3(0.0);
-    for (int i = 0; i < 4; ++i) {
-        vec2 uv = sp.xy + (rot * offsets[i]) * (0.75 * invRes);
-        sum += evalShadowTapColored(uv, sp.z - bias);
+    float zPerBlock = shadowScreenZPerBlock();
+    float baseBias = max(0.016 * zPerBlock, 2.0e-5);
+    float zRef = sp.z - baseBias;
+    float invRes = 1.0 / float(shadowMapResolution);
+
+    float angle = TWO_PI * blueNoise01;
+    const float GOLDEN_ANGLE = 2.39996323;
+
+    // 1) Blocker search (8-tap Vogel disk): search radius scales with local distorted texel size (~0.55 blocks).
+    float searchRadiusUV = clamp((0.55 / max(texelWorld, 1e-4)) * invRes, 1.5 * invRes, 10.0 * invRes);
+    float blockerSum = 0.0;
+    int blockerCount = 0;
+    for (int i = 0; i < 8; ++i) {
+        float r = sqrt((float(i) + 0.5) * (1.0 / 8.0)) * searchRadiusUV;
+        float a = float(i) * GOLDEN_ANGLE + angle;
+        vec2 uv = sp.xy + vec2(cos(a), sin(a)) * r;
+        float d = textureLod(shadowtex0, uv, 0.0).r;
+        if (d < zRef) {
+            blockerSum += d;
+            ++blockerCount;
+        }
     }
-    return sum * 0.25;
+
+    // Fully lit early-out (0 blockers within search cone).
+    if (blockerCount == 0) return vec3(1.0);
+
+    float avgBlockerZ = blockerSum / float(blockerCount);
+    float blockerDistBlocks = max(zRef - avgBlockerZ, 0.0) / max(zPerBlock, 1e-6);
+
+    // Physical sun angular size (~1.5 deg radius) -> crisp at contact, soft far from occluder.
+    float penumbraWorld = clamp(blockerDistBlocks * 0.028, 0.02, 0.85);
+    float pcfRadiusUV = clamp((penumbraWorld / max(texelWorld, 1e-4)) * invRes, 0.6 * invRes, 12.0 * invRes);
+    float pcfBias = max((0.016 + 0.022 * penumbraWorld) * zPerBlock, 2.0e-5);
+
+    // 2) Variable-penumbra colored PCF (12-tap Vogel disk with blue-noise rotation).
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < 12; ++i) {
+        float r = sqrt((float(i) + 0.5) * (1.0 / 12.0)) * pcfRadiusUV;
+        float a = float(i) * GOLDEN_ANGLE + angle + 0.7;
+        vec2 uv = sp.xy + vec2(cos(a), sin(a)) * r;
+        sum += evalShadowTapColored(uv, sp.z - pcfBias);
+    }
+    return mix(vec3(1.0), sum * (1.0 / 12.0), borderFade);
+}
+
+// Keep alias for compatibility with any caller.
+vec3 sampleShadowPCF(vec3 worldPos, vec3 normal, float blueNoise01) {
+    return sampleShadowPCSS(worldPos, normal, blueNoise01);
 }
 
 #endif

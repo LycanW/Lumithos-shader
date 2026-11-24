@@ -44,7 +44,7 @@ void main() {
         -viewPos.z
     ));
 
-    // Direct Sunlight / Moonlight (4-tap blue-noise-rotated colored PCF on Shadow Map)
+    // Direct Sunlight / Moonlight (Contact-Hardening Blue-Noise PCSS on Shadow Map)
     // Smooth grazing-horizon fade on geoNormal prevents normal-map bumps from binary-flashing
     // when sunlight skims parallel to a wall (dot(geoNormal, lightDir) ≈ 0).
     vec3 lightDir = getShadowLightDir();
@@ -52,9 +52,24 @@ void main() {
     float NdotL = max(dot(mat.shadeNormal, lightDir), 0.0);
     float geoHorizon = smoothstep(0.0, 0.08, dot(mat.geoNormal, lightDir));
     vec3 shadowVis = (NdotL > 0.0 && geoHorizon > 0.0 && maxOf(directCol) > 1e-4)
-        ? sampleShadowPCF(worldPos, mat.geoNormal, stbn2D(px, frameCounter, 7u).x) * geoHorizon
+        ? sampleShadowPCSS(worldPos, mat.geoNormal, stbn2D(px, frameCounter, 7u).x) * geoHorizon
         : vec3(0.0);
     vec3 directDiffuse = mat.albedo * INV_PI * directCol * (NdotL * shadowVis);
+
+    // LabPBR 1.3 subsurface scattering (thin-slab back-lit transmission, Henyey-Greenstein forward lobe).
+    // Back-face visibility is evaluated against the shadow map from the opposite side of the slab.
+    vec3 sssLight = vec3(0.0);
+    if (mat.sss > 0.0 && maxOf(directCol) > 1e-4) {
+        float backNL = dot(-mat.geoNormal, lightDir);
+        if (backNL > 0.0) {
+            vec3 transVis = sampleShadowPCSS(worldPos, -mat.geoNormal, stbn2D(px, frameCounter, 11u).x);
+            float mu = dot(-viewDir, lightDir);
+            const float g = 0.55;
+            float hg = (1.0 - g * g) / (4.0 * PI * pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5));
+            float phase = 0.35 * INV_PI + 0.65 * hg;
+            sssLight = mat.albedo * mat.albedo * directCol * transVis * (mat.sss * phase * saturate(backNL + 0.25));
+        }
+    }
 
     // Direct Specular Highlight (Cook-Torrance GGX with Height-Correlated Smith Visibility & LabPBR RGB F0)
     vec3 F0_rgb = evalLabPBRF0(mat.f0, mat.albedo);
@@ -88,8 +103,11 @@ void main() {
     float specTraceFade = isMetal ? 1.0 : smoothstep(SPECULAR_ROUGH_CUTOFF, 0.50, mat.roughness);
     vec3 specEnv = mat.isHand ? diffuseGI : mix(diffuseGI, specularGI, specTraceFade);
 
-    vec3 diffuseLit = directDiffuse * kD_direct + (diffuseGI * mat.albedo) * kD_env + emissive;
-    vec3 finalLit   = diffuseLit + directSpec + specEnv * envBrdf;
+    // LabPBR material AO (normals.b) on indirect diffuse + Lagarde specular occlusion on indirect specular.
+    float specOcc = saturate(pow(NdotV + mat.ao, exp2(-16.0 * mat.roughness - 1.0)) - 1.0 + mat.ao);
+
+    vec3 diffuseLit = directDiffuse * kD_direct + sssLight * kD_direct + (diffuseGI * mat.albedo) * (kD_env * mat.ao) + emissive;
+    vec3 finalLit   = diffuseLit + directSpec + specEnv * envBrdf * specOcc;
 
     // Store pure diffuse+emissive radiance in colortex5.rgb, and emission flag in .a so
     // DIFFUSE_SSRT can stay enabled alongside NEE without double-counting block lamps!

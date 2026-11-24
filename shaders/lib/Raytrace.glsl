@@ -263,19 +263,19 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                         vec2 uv0, uv1, uv2;
                         vec3 tintSrgb;
                         float primEmit;
-                        bool primTrans;
-                        unpackScenePrimShade(curIdx, uv0, uv1, uv2, tintSrgb, primEmit, primTrans);
+                        bool primTrans, primWater;
+                        unpackScenePrimShade(curIdx, uv0, uv1, uv2, tintSrgb, primEmit, primTrans, primWater);
 
                         vec2 hitUV = uv0 * (1.0 - u - v) + uv1 * u + uv2 * v;
-                        vec4 tex = textureLod(colortex14, hitUV, atlasLod);
-                        if (tex.a < 0.1) continue;
+                        vec4 tex = primWater ? vec4(1.0) : textureLod(colortex14, hitUV, atlasLod);
+                        if (!primWater && tex.a < 0.1) continue;
 
-                        if (passTranslucent && primTrans && primEmit <= 0.0 && tex.a < 0.98) {
-                            // Stained glass pane / water surface: apply transmittance once per voxel!
+                        if (passTranslucent && (primWater || (primTrans && primEmit <= 0.0 && tex.a < 0.98))) {
+                            // Secondary rays store interfaces only. Approximate one block of water per crossing.
                             if (t < bestTransT) {
                                 bestTransT = t;
                                 hitTrans = true;
-                                transFilter = evalGlassTransmittance(tex.rgb * tintSrgb, tex.a);
+                                transFilter = primWater ? exp(-waterExtinction(tintSrgb)) : evalGlassTransmittance(tex.rgb * tintSrgb, tex.a);
                             }
                             continue;
                         }
@@ -457,6 +457,7 @@ vec3 traceVisibility(vec3 worldOrigin, vec3 targetVoxelPos, ivec3 targetVoxel, i
             if (primIdx != PRIM_END) {
                 vec3 voxelExitPlane = (vec3(vCoord + stepPos) - vOrigin) * invDir;
                 float tLimit = min(minOf(voxelExitPlane) + 1e-3, targetDist);
+                float bestTransT = tLimit;
                 vec3 localOrig = vOrigin - vec3(vCoord);
                 bool hitTrans = false;
                 vec3 transFilter = vec3(1.0);
@@ -486,16 +487,19 @@ vec3 traceVisibility(vec3 worldOrigin, vec3 targetVoxelPos, ivec3 targetVoxel, i
                     vec2 uv0, uv1, uv2;
                     vec3 tintSrgb;
                     float primEmit;
-                    bool primTrans;
-                    unpackScenePrimShade(curIdx, uv0, uv1, uv2, tintSrgb, primEmit, primTrans);
+                    bool primTrans, primWater;
+                    unpackScenePrimShade(curIdx, uv0, uv1, uv2, tintSrgb, primEmit, primTrans, primWater);
 
                     vec2 hitUV = uv0 * (1.0 - u - v) + uv1 * u + uv2 * v;
-                    vec4 tex = textureLod(colortex14, hitUV, 1.0);
-                    if (tex.a < 0.1) continue;
+                    vec4 tex = primWater ? vec4(1.0) : textureLod(colortex14, hitUV, 1.0);
+                    if (!primWater && tex.a < 0.1) continue;
 
-                    if (primTrans && primEmit <= 0.0 && tex.a < 0.98) {
-                        hitTrans = true;
-                        transFilter = evalGlassTransmittance(tex.rgb * tintSrgb, tex.a);
+                    if (primWater || (primTrans && primEmit <= 0.0 && tex.a < 0.98)) {
+                        if (t < bestTransT) {
+                            hitTrans = true;
+                            bestTransT = t;
+                            transFilter = primWater ? exp(-waterExtinction(tintSrgb)) : evalGlassTransmittance(tex.rgb * tintSrgb, tex.a);
+                        }
                     } else {
                         return vec3(0.0);
                     }

@@ -115,7 +115,7 @@ float unpackSky(uint tintAndSky) {
 }
 
 // Pack & unpack Track 2 compact non-cube triangle (48 bytes).
-ScenePrim packScenePrim(vec3 p0, vec3 e1, vec3 e2, vec2 uv0, vec2 uv1, vec2 uv2, vec3 tintSrgb, uint emissive4, bool isTranslucent, uint nextIdx) {
+ScenePrim packScenePrim(vec3 p0, vec3 e1, vec3 e2, vec2 uv0, vec2 uv1, vec2 uv2, vec3 tintSrgb, uint emissive4, bool isTranslucent, bool isWater, uint nextIdx) {
     ScenePrim pr;
     pr.geo.x  = packSnorm2x16(clamp(p0.xy * 0.5, -1.0, 1.0));
     pr.geo.y  = packSnorm2x16(clamp(vec2(p0.z, e1.x) * 0.5, -1.0, 1.0));
@@ -126,7 +126,7 @@ ScenePrim packScenePrim(vec3 p0, vec3 e1, vec3 e2, vec2 uv0, vec2 uv1, vec2 uv2,
     pr.uv.z   = packUnorm2x16(saturate(uv1));
     pr.uv.w   = packUnorm2x16(saturate(uv2));
     uint rgb  = packUnorm4x8(vec4(saturate(tintSrgb), 0.0)) & 0x00ffffffu;
-    pr.meta   = uvec4(nextIdx, rgb | ((emissive4 & 15u) << 24u) | (uint(isTranslucent) << 28u), 0u, 0u);
+    pr.meta   = uvec4(nextIdx, rgb | ((emissive4 & 15u) << 24u) | (uint(isTranslucent) << 28u) | (uint(isWater) << 29u), 0u, 0u);
     return pr;
 }
 
@@ -168,7 +168,7 @@ void unpackScenePrimGeo(uint idx, out vec3 p0, out vec3 e1, out vec3 e2, out uin
     e2 = vec3(g3.x, g3.y, g4.x);
 }
 
-void unpackScenePrimShade(uint idx, out vec2 uv0, out vec2 uv1, out vec2 uv2, out vec3 tintSrgb, out float emissive, out bool isTranslucent) {
+void unpackScenePrimShade(uint idx, out vec2 uv0, out vec2 uv1, out vec2 uv2, out vec3 tintSrgb, out float emissive, out bool isTranslucent, out bool isWater) {
     uvec4 uvw = primPool.prims[idx].uv;
     uint metaY = primPool.prims[idx].meta.y;
 
@@ -178,6 +178,7 @@ void unpackScenePrimShade(uint idx, out vec2 uv0, out vec2 uv1, out vec2 uv2, ou
     tintSrgb      = unpackUnorm4x8(metaY).rgb;
     emissive      = float((metaY >> 24u) & 15u) * (1.0 / 15.0);
     isTranslucent = ((metaY >> 28u) & 1u) != 0u;
+    isWater       = ((metaY >> 29u) & 1u) != 0u;
 }
 
 #endif

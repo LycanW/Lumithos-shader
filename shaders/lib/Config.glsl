@@ -64,11 +64,14 @@ const bool  shadowcolor0Nearest = true;
 
 /*
     const int colortex0Format = RGBA16F;  // lit scene / final
-    const int colortex1Format = RG32UI;   // G-Buffer 0: albedoRGB8+sky8, pbr+flags
+    const int colortex1Format = RG32UI;   // G-Buffer 0: albedoRGB8+sky8, pbr+flags+sss+ao
     const int colortex2Format = R32UI;    // G-Buffer 1: geoNormal16 + shadeNormal16
     const int colortex3Format = RGBA16F;  // Diffuse GI (raw -> denoised)
     const int colortex4Format = RGBA16F;  // Specular GI (raw -> denoised)
     const int colortex5Format = RGBA16F;  // Previous frame lit color (for SSRT/SSR reuse)
+    const int colortex6Format = RGBA16F;  // Translucent in-scattered + reflected radiance (rgb), layer opacity (a)
+    const int colortex7Format = RGBA16F;  // Translucent per-channel transmittance (multiplicative, clear = 1)
+    const int colortex8Format = RG16F;    // Translucent refraction screen-UV offset
 
     const bool colortex0Clear = true;
     const bool colortex1Clear = false;
@@ -76,6 +79,12 @@ const bool  shadowcolor0Nearest = true;
     const bool colortex3Clear = false;
     const bool colortex4Clear = false;
     const bool colortex5Clear = false;
+    const bool colortex6Clear = true;
+    const bool colortex7Clear = true;
+    const bool colortex8Clear = true;
+    const vec4 colortex6ClearColor = vec4(0.0, 0.0, 0.0, 0.0);
+    const vec4 colortex7ClearColor = vec4(1.0, 1.0, 1.0, 1.0);
+    const vec4 colortex8ClearColor = vec4(0.0, 0.0, 0.0, 0.0);
 */
 
 #endif

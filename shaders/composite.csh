@@ -9,11 +9,36 @@ layout(local_size_x = 8, local_size_y = 8) in;
 const vec2 workGroupsRender = vec2(1.0, 1.0);
 
 uniform sampler2D taaHistTex;
+uniform sampler2D colortex6;
+uniform sampler2D colortex7;
+uniform sampler2D colortex8;
 layout(rgba16f) uniform writeonly image2D taaHistImg;
 
 const float TAA_MAX_FRAMES  = 16.0;
 const float TAA_CLIP_GAMMA  = 1.5;
 const float TAA_ANTIFLICKER = 0.25;
+
+// Resolve translucent layers over the opaque scene: bg(refracted) * T + L.
+// Refraction only samples background pixels that lie behind the translucent surface (no foreground leaks).
+vec3 fetchSceneColor(ivec2 q, ivec2 res) {
+    vec3 bg = texelFetch(colortex0, q, 0).rgb;
+    vec3 T  = texelFetch(colortex7, q, 0).rgb;
+    vec3 L  = texelFetch(colortex6, q, 0).rgb;
+    if (minOf(T) < 0.9999 || maxOf(L) > 0.0) {
+        vec2 off = texelFetch(colortex8, q, 0).rg;
+        if (dot(off, off) > 1e-10) {
+            ivec2 rq = clamp(q + ivec2(round(off * vec2(res))), ivec2(0), res - 1);
+            float surfDepth = texelFetch(depthtex0, q, 0).r;
+            if (texelFetch(depthtex1, rq, 0).r > surfDepth && texelFetch(colortex7, rq, 0).r < 0.9999) {
+                bg = texelFetch(colortex0, rq, 0).rgb;
+            }
+        }
+        bg = bg * T + L;
+    }
+    bg = max(bg, vec3(0.0));
+    if (any(isnan(bg)) || any(isinf(bg))) bg = vec3(0.0);
+    return bg;
+}
 
 void main() {
     ivec2 px = ivec2(gl_GlobalInvocationID.xy);
@@ -25,8 +50,7 @@ void main() {
     ivec2 currOff = ivec2(currSide * res.x, 0);
     ivec2 prevOff = ivec2(prevSide * res.x, 0);
 
-    vec3 curr = max(texelFetch(colortex0, px, 0).rgb, vec3(0.0));
-    if (any(isnan(curr)) || any(isinf(curr))) curr = vec3(0.0);
+    vec3 curr = fetchSceneColor(px, res);
 
     #if !defined(TAA_ENABLED) || DEBUG_VIEW == 1 || DEBUG_VIEW == 5
         imageStore(taaHistImg, px + currOff, roundHalf(vec4(curr, 1.0)));
@@ -34,6 +58,8 @@ void main() {
     #endif
 
     float centerDepth = texelFetch(depthtex1, px, 0).r;
+    float centerDepth0 = texelFetch(depthtex0, px, 0).r;
+    bool isTranslucent = centerDepth0 < centerDepth - 1e-7;
     float centerRough = 1.0;
     bool centerHand = false;
     vec3 centerGeoN = vec3(0.0, 1.0, 0.0);
@@ -42,21 +68,21 @@ void main() {
     if (centerDepth < 0.999999) {
         readGBufferRoughHand(px, centerRough, centerHand);
         // First-person hand has no world motion vector and swings rapidly -> bypass TAA cleanly (zero hand ghosting!).
-        if (centerHand) {
+        if (centerHand && !isTranslucent) {
             imageStore(taaHistImg, px + currOff, roundHalf(vec4(curr, 1.0)));
             return;
         }
         readGBufferNormals(px, centerGeoN, centerShadeN);
     }
 
-    // 3x3 closest-depth dilation keeps thin foreground silhouettes sharp.
-    float bestDepth = centerDepth;
+    // 3x3 closest-depth dilation (including translucent surfaces) keeps thin foreground silhouettes sharp.
+    float bestDepth = centerDepth0;
     ivec2 bestPx = px;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             if (x == 0 && y == 0) continue;
             ivec2 q = clamp(px + ivec2(x, y), ivec2(0), res - 1);
-            float d = texelFetch(depthtex1, q, 0).r;
+            float d = texelFetch(depthtex0, q, 0).r;
             if (d < bestDepth) {
                 bestDepth = d;
                 bestPx = q;
@@ -89,7 +115,7 @@ void main() {
         vec2 refUV = bestUV;
 
         // Exact planar virtual reflection reprojection for flat mirrors (using actual bobbed eye ray).
-        if (centerDepth < 0.999999 && abs(centerDepth - bestDepth) < 0.002
+        if (!isTranslucent && centerDepth < 0.999999 && abs(centerDepth - bestDepth) < 0.002
             && centerRough < 0.08 && dot(centerShadeN, centerGeoN) > 0.998) {
             float hitDist = texelFetch(colortex4, px, 0).a;
             if (hitDist > 0.05 && hitDist < 256.0) {
@@ -123,7 +149,7 @@ void main() {
             if (pg.w <= 0.0 || pg.z >= 0.08 || dot(centerGeoN, unpackNormal16(uint(round(pg.x)))) < 0.96) {
                 validMotion = false;
             }
-        } else if (bestPx == px) {
+        } else if (bestPx == px && !isTranslucent) {
             float expectedPrevDepth = -(gbufferPreviousModelView * vec4(centerWorld + cameraVelocity, 1.0)).z;
             float depthTol = max(0.25, 0.15 * max(expectedPrevDepth, 0.1));
             ivec2 gBase = ivec2(floor(alignedPrevUV * vec2(res) - 0.5));
@@ -157,7 +183,7 @@ void main() {
                 for (int x = -1; x <= 1; ++x) {
                     if (x == 0 && y == 0) continue;
                     ivec2 q = clamp(px + ivec2(x, y), ivec2(0), res - 1);
-                    vec3 s = rgbToYCoCg(max(texelFetch(colortex0, q, 0).rgb, vec3(0.0)));
+                    vec3 s = rgbToYCoCg(fetchSceneColor(q, res));
                     m1 += s;
                     m2 += s * s;
                 }

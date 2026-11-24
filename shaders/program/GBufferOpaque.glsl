@@ -4,6 +4,7 @@
     in vec4 at_tangent;
     #ifdef STAGE_TERRAIN
         in vec4 at_midBlock;
+        in vec2 mc_Entity;
     #endif
 
     out vec2 vTexCoord;
@@ -12,6 +13,7 @@
     out vec4 vTangent;
     out float vSkyLight;
     out float vBlockEmit;
+    out float vIsFoliage;
 
     void main() {
         vec4 clipPos = ftransform();
@@ -29,13 +31,16 @@
         vSkyLight  = saturate((gl_MultiTexCoord1.y - 8.0) / 232.0);
         #ifdef STAGE_TERRAIN
             vBlockEmit = saturate(at_midBlock.w / 15.0);
+            vIsFoliage = (abs(mc_Entity.x - 10002.0) < 0.5) ? 1.0 : 0.0;
         #else
             vBlockEmit = 0.0;
+            vIsFoliage = 0.0;
         #endif
     }
 #endif
 
 #ifdef FSH
+    #include "/lib/MaterialMaps.glsl"
     uniform sampler2D gtexture;
     uniform sampler2D normals;
     uniform sampler2D specular;
@@ -47,6 +52,7 @@
     in vec4 vTangent;
     in float vSkyLight;
     in float vBlockEmit;
+    in float vIsFoliage;
 
     /* RENDERTARGETS: 1,2 */
     layout(location = 0) out uvec2 gbuf0Out;
@@ -76,39 +82,52 @@
         }
 
         vec3 shadeNormal = geoNormal;
+        float matAO = 1.0;
         #if defined(MC_NORMAL_MAP) && !defined(STAGE_BASIC)
-            vec2 nXY = texture(normals, vTexCoord).rg * 2.0 - 1.0;
-            float nLenSq = dot(nXY, nXY);
-            if (nLenSq > 1e-4) {
-                vec3 tNorm = vec3(nXY, sqrt(max(0.0, 1.0 - nLenSq)));
-                vec3 T = normalize(vTangent.xyz - geoNormal * dot(vTangent.xyz, geoNormal));
-                vec3 B = cross(geoNormal, T) * (vTangent.w < 0.0 ? -1.0 : 1.0);
-                shadeNormal = normalize(T * tNorm.x + B * tNorm.y + geoNormal * tNorm.z);
+            vec4 normTex = texture(normals, vTexCoord);
+            shadeNormal = applyLabPBRNormal(geoNormal, vTangent, normTex.rg);
+            // LabPBR 1.3 normals.b encodes micro-surface AO (guard near-zero empty channels).
+            if (normTex.b > 0.01) {
+                matAO = saturate(normTex.b);
             }
         #endif
 
         float roughness = 0.92;
         float f0 = 0.04;
+        float porosity = 0.0;
+        float sss = 0.0;
         float pbrEmit = 0.0;
         #if defined(MC_SPECULAR_MAP) && !defined(STAGE_BASIC)
-            ivec2 sRes = max(textureSize(specular, 0), ivec2(1));
-            ivec2 sPx  = clamp(ivec2(fract(vTexCoord) * vec2(sRes)), ivec2(0), sRes - 1);
-            vec4 specTex = texelFetch(specular, sPx, 0);
-            // Mipmap-filter continuous smoothness (R) to eliminate grazing-angle roughness/specular
-            // flickering, while keeping discrete LabPBR metal F0 codes (G) and emission (A) exact!
-            specTex.r = texture(specular, vTexCoord).r;
-            decodeLabPBR(specTex, roughness, f0, pbrEmit);
+            vec4 specTex = sampleLabPBRSpec(specular, vTexCoord);
+            decodeLabPBR(specTex, roughness, f0, porosity, sss, pbrEmit);
         #endif
-        float maxAlb = maxOf(srgbToLinear(albedoSrgb));
-        float emitMask = (pbrEmit > 0.0) ? 1.0 : smoothstep(0.12, 0.42, maxAlb);
-        float emission = max(vBlockEmit * emitMask, pbrEmit);
+
+        // Automatic foliage/plant SSS fallback when resource pack doesn't encode specular.b SSS.
+        if (vIsFoliage > 0.5 && sss < 0.01) {
+            sss = 0.65;
+        }
 
         bool isHand = false;
         #ifdef STAGE_HAND
             isHand = true;
         #endif
 
-        gbuf0Out = packGBuffer0(albedoSrgb, roughness, f0, emission, vSkyLight, isHand);
+        // LabPBR 1.3 rain wetness & porosity: porous sky-exposed blocks darken albedo and smooth roughness.
+        if (!isHand && wetness > 1e-3 && !isLabPBRMetal(f0)) {
+            float wet = wetness * smoothstep(0.80, 0.96, vSkyLight) * smoothstep(0.15, 0.70, geoNormal.y);
+            if (wet > 1e-3) {
+                vec3 linAlb = srgbToLinear(albedoSrgb);
+                linAlb *= mix(1.0, 0.48, wet * porosity);
+                albedoSrgb = linearToSrgb(linAlb);
+                roughness = mix(roughness, 0.06, wet * (1.0 - 0.55 * porosity));
+            }
+        }
+
+        float maxAlb = maxOf(srgbToLinear(albedoSrgb));
+        float emitMask = (pbrEmit > 0.0) ? 1.0 : smoothstep(0.12, 0.42, maxAlb);
+        float emission = max(vBlockEmit * emitMask, pbrEmit);
+
+        gbuf0Out = packGBuffer0(albedoSrgb, roughness, f0, emission, vSkyLight, sss, matAO, isHand);
         gbuf1Out = packGBuffer1(geoNormal, shadeNormal);
     }
 #endif
