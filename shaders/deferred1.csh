@@ -43,6 +43,11 @@ void main() {
     float depth = texelFetch(depthtex1, px, 0).r;
     if (depth >= 0.999999) return;
 
+    float rough;
+    bool isHand;
+    readGBufferRoughHand(px, rough, isHand);
+    if (isHand) return;
+
     vec3 geoNormal, shadeNormal;
     readGBufferNormals(px, geoNormal, shadeNormal);
 

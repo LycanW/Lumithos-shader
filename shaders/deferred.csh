@@ -52,6 +52,10 @@ void main() {
     float rough;
     bool isHand;
     readGBufferRoughHand(px, rough, isHand);
+    if (isHand) {
+        imageStore(colorimg3, px, vec4(0.0));
+        return;
+    }
     vec3 geoNormal, shadeNormal;
     readGBufferNormals(px, geoNormal, shadeNormal);
 

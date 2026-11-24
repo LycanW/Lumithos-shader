@@ -114,12 +114,18 @@ vec3 sampleShadowFastRay(vec3 worldPos, vec3 normal, vec3 inRayDir) {
 
 // Contact-Hardening Blue-Noise PCSS (8-tap Vogel Blocker Search + 12-tap Variable-Penumbra Colored PCF)
 // - Razor-sharp shadows at contact points, physically softening with blocker distance.
-// - Lossless early-out when 0 blockers are found (fast in open sunlight!).
-// - Smooth shadow-map border fade (no hard 128-block shadow box edge).
-vec3 sampleShadowPCSS(vec3 worldPos, vec3 normal, float blueNoise01) {
+// - Lossless early-out when 0 blockers are found or outside shadowDistance.
+// - Outputs smooth spherical + border coverage (`outShadowCoverage`) so deferred12.csh can
+//   seamlessly hand off to distant screen-space sun shadows + skyLight occlusion with zero ring!
+vec3 sampleShadowPCSS(vec3 worldPos, vec3 normal, float blueNoise01, out float outShadowCoverage) {
+    outShadowCoverage = 0.0;
     vec3 lightDir = getShadowLightDir();
     float NdotL = dot(normal, lightDir);
     if (NdotL <= 0.0) return vec3(0.0);
+
+    float worldDist = length(worldPos);
+    float distFade = smoothstep(shadowDistance, shadowDistance * 0.78, worldDist);
+    if (distFade <= 1e-4) return vec3(1.0);
 
     vec3 eyeToSurf = worldPos - gbufferModelViewInverse[3].xyz;
     float dist = length(eyeToSurf);
@@ -129,8 +135,9 @@ vec3 sampleShadowPCSS(vec3 worldPos, vec3 normal, float blueNoise01) {
     if (any(lessThan(sp, vec3(0.0))) || any(greaterThan(sp, vec3(1.0)))) return vec3(1.0);
 
     float edgeDist = max(abs(sp.x - 0.5), abs(sp.y - 0.5));
-    float borderFade = smoothstep(0.50, 0.45, edgeDist);
-    if (borderFade <= 1e-4) return vec3(1.0);
+    float uvFade = smoothstep(0.50, 0.44, edgeDist);
+    outShadowCoverage = min(distFade, uvFade);
+    if (outShadowCoverage <= 1e-4) return vec3(1.0);
 
     float zPerBlock = shadowScreenZPerBlock();
     float baseBias = max(0.016 * zPerBlock, 2.0e-5);
@@ -174,7 +181,14 @@ vec3 sampleShadowPCSS(vec3 worldPos, vec3 normal, float blueNoise01) {
         vec2 uv = sp.xy + vec2(cos(a), sin(a)) * r;
         sum += evalShadowTapColored(uv, sp.z - pcfBias);
     }
-    return mix(vec3(1.0), sum * (1.0 / 12.0), borderFade);
+    return sum * (1.0 / 12.0);
+}
+
+// Convenience overload for translucent pass (fades smoothly to 1.0 past shadowDistance).
+vec3 sampleShadowPCSS(vec3 worldPos, vec3 normal, float blueNoise01) {
+    float cov;
+    vec3 vis = sampleShadowPCSS(worldPos, normal, blueNoise01, cov);
+    return mix(vec3(1.0), vis, cov);
 }
 
 #endif

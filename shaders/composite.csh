@@ -14,8 +14,8 @@ uniform sampler2D colortex7;
 uniform sampler2D colortex8;
 layout(rgba16f) uniform writeonly image2D taaHistImg;
 
-const float TAA_MAX_FRAMES  = 16.0;
-const float TAA_CLIP_GAMMA  = 1.5;
+const float TAA_MAX_FRAMES  = 32.0;
+const float TAA_CLIP_GAMMA  = 2.0;
 const float TAA_ANTIFLICKER = 0.25;
 
 // Resolve translucent layers over the opaque scene: bg(refracted) * T + L.
@@ -75,18 +75,16 @@ void main() {
         readGBufferNormals(px, centerGeoN, centerShadeN);
     }
 
-    // 3x3 closest-depth dilation (including translucent surfaces) keeps thin foreground silhouettes sharp.
+    // 5-tap diagonal closest-depth dilation (including translucent surfaces) keeps thin silhouettes sharp.
     float bestDepth = centerDepth0;
     ivec2 bestPx = px;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            if (x == 0 && y == 0) continue;
-            ivec2 q = clamp(px + ivec2(x, y), ivec2(0), res - 1);
-            float d = texelFetch(depthtex0, q, 0).r;
-            if (d < bestDepth) {
-                bestDepth = d;
-                bestPx = q;
-            }
+    const ivec2 diagOffs[4] = ivec2[4](ivec2(1, 1), ivec2(-1, 1), ivec2(1, -1), ivec2(-1, -1));
+    for (int i = 0; i < 4; ++i) {
+        ivec2 q = clamp(px + diagOffs[i], ivec2(0), res - 1);
+        float d = texelFetch(depthtex0, q, 0).r;
+        if (d < bestDepth) {
+            bestDepth = d;
+            bestPx = q;
         }
     }
 
@@ -94,8 +92,6 @@ void main() {
     vec2 bestUV = (vec2(bestPx) + 0.5) * texelSize();
     vec2 motion = vec2(0.0);
     bool validMotion = false;
-    bool isMirrorInterior = false;
-    vec3 centerWorld = vec3(0.0);
 
     if (bestDepth >= 0.999999) {
         vec3 skyDir = normalize(mat3(gbufferModelViewInverse) * screenToView(vec3(uv, 1.0)));
@@ -109,7 +105,7 @@ void main() {
         }
     } else {
         vec3 centerView = (centerDepth < 0.999999) ? screenToView(vec3(uv, centerDepth)) : vec3(0.0);
-        centerWorld = (centerDepth < 0.999999) ? viewToWorld(centerView) : vec3(0.0);
+        vec3 centerWorld = (centerDepth < 0.999999) ? viewToWorld(centerView) : vec3(0.0);
 
         vec3 reprojTarget = viewToWorld(screenToView(vec3(bestUV, bestDepth)));
         vec2 refUV = bestUV;
@@ -122,7 +118,6 @@ void main() {
                 vec3 eyeRayDir = normalize(mat3(gbufferModelViewInverse) * centerView);
                 reprojTarget = centerWorld + eyeRayDir * hitDist;
                 refUV = uv;
-                isMirrorInterior = true;
             }
         }
 
@@ -136,39 +131,6 @@ void main() {
     vec2 prevUV = uv + motion;
     vec3 result = curr;
     float outFrames = 1.0;
-
-    // Geometry-guided disocclusion check using jitter-aligned prevGuideTex:
-    // - Mirror interior: reject if previous pixel was outside this mirror plane (prevents sky bleed across mirror edges).
-    // - Solid surface interior (bestPx == px): check 2x2 around jitter-aligned prevGuideUV so thin iron bars
-    //   never falsely reset from subpixel jitter while placed/broken blocks still reset immediately!
-    if (validMotion && centerDepth < 0.999999 && all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThan(prevUV, vec2(1.0)))) {
-        vec2 alignedPrevUV = prevUV + 0.5 * (getPrevTaaJitter() - taaJitter);
-        if (isMirrorInterior) {
-            ivec2 pGuidePx = clamp(ivec2(alignedPrevUV * vec2(res)), ivec2(0), res - 1);
-            vec4 pg = texelFetch(prevGuideTex, pGuidePx, 0);
-            if (pg.w <= 0.0 || pg.z >= 0.08 || dot(centerGeoN, unpackNormal16(uint(round(pg.x)))) < 0.96) {
-                validMotion = false;
-            }
-        } else if (bestPx == px && !isTranslucent) {
-            float expectedPrevDepth = -(gbufferPreviousModelView * vec4(centerWorld + cameraVelocity, 1.0)).z;
-            float depthTol = max(0.25, 0.15 * max(expectedPrevDepth, 0.1));
-            ivec2 gBase = ivec2(floor(alignedPrevUV * vec2(res) - 0.5));
-            bool foundMatch = false;
-            for (int j = 0; j < 4; ++j) {
-                ivec2 gp = clamp(gBase + ivec2(j & 1, j >> 1), ivec2(0), res - 1);
-                vec4 pg = texelFetch(prevGuideTex, gp, 0);
-                if (pg.w > 0.0
-                    && abs(expectedPrevDepth - pg.w) <= depthTol
-                    && dot(centerGeoN, unpackNormal16(uint(round(pg.x)))) >= 0.80) {
-                    foundMatch = true;
-                    break;
-                }
-            }
-            if (!foundMatch) {
-                validMotion = false;
-            }
-        }
-    }
 
     if (frameCounter > 1 && validMotion && all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThan(prevUV, vec2(1.0)))) {
         vec4 prevTap = fetchHistoryFast4(taaHistTex, prevUV, res, prevOff);

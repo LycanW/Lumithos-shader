@@ -3,9 +3,7 @@
 // Pass: Combine Direct Sunlight + Emission + Diffuse GI + Specular GI + Sky + Debug Views,
 // and publish prevGuideImg (exact float32 integers!) + diffuse-safe colortex5 (lit history).
 #include "/lib/SkyShadow.glsl"
-#if DEBUG_VIEW == 4
-    #include "/lib/RadianceCache.glsl"
-#endif
+#include "/lib/RadianceCache.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 const vec2 workGroupsRender = vec2(1.0, 1.0);
@@ -173,6 +171,84 @@ void evalHeldHandLight(int lightVal, int itemId, vec3 handViewPos, GBufferMat ma
     }
 }
 
+// Perspective-exact clip-space Screen-Space Sun Shadow (Contact + Distant Auto-Extension):
+// - Inside shadowDistance (shadowCoverage ~ 1): tight contact shadow plugs thin-geometry bias leaks.
+// - Beyond shadowDistance (shadowCoverage -> 0): ray length automatically extends to 12..80 blocks so
+//   distant mountains, builds, and forests cast continuous directional sun shadows with zero range ring!
+float traceSunScreenSpaceShadow(vec3 viewPos, vec3 viewGeoN, vec3 viewLightDir, float shadowCoverage, bool isOriginHand, bool isFoliage, float noise) {
+    if (isOriginHand) return 1.0;
+
+    float viewZ = -viewPos.z;
+    vec2 projScale = vec2(gbufferProjection[0][0], gbufferProjection[1][1]);
+    vec2 invRes = texelSize();
+    float pixelWorldSize = 2.0 * viewZ * max(invRes.x / max(abs(projScale.x), 1e-4), invRes.y / max(abs(projScale.y), 1e-4));
+    float geoNdotL = saturate(dot(viewGeoN, viewLightDir));
+
+    float nearLen = isFoliage ? clamp(0.22 + sqrt(viewZ) * 0.06, 0.22, 0.85) : clamp(0.16 + sqrt(viewZ) * 0.07, 0.16, 1.10);
+    float farLen  = clamp(viewZ * 0.35, 12.0, 84.0);
+    float rayLen  = mix(farLen, nearLen, shadowCoverage);
+
+    vec3 startView = viewPos
+        + viewGeoN * min(pixelWorldSize * (1.2 + 1.2 / max(geoNdotL, 0.15)), 0.14 + 0.0035 * viewZ)
+        + viewLightDir * min(pixelWorldSize * 1.2, 0.08 + 0.002 * viewZ);
+
+    vec3 endView = startView + viewLightDir * rayLen;
+    if (-endView.z < 0.15) {
+        float tClamp = saturate((startView.z + 0.15) / min(startView.z - endView.z, -1e-4));
+        endView = mix(startView, endView, tClamp);
+    }
+    float traceDist = length(endView - startView);
+    if (traceDist <= 1e-3) return 1.0;
+
+    vec3 startClip = vec3(projScale * startView.xy + gbufferProjection[2].xy * startView.z, -startView.z);
+    vec3 endClip   = vec3(projScale * endView.xy   + gbufferProjection[2].xy * endView.z,   -endView.z);
+    vec3 rayClip   = endClip - startClip;
+
+    const int STEPS = 12;
+    const float invSamples = 1.0 / float(STEPS);
+    vec2 res = screenSize();
+    float maxOcc = 0.0;
+
+    for (int i = 0; i < STEPS; ++i) {
+        float u = (float(i) + noise) * invSamples;
+        float t = u * (0.12 + u * (0.33 + 0.55 * u));
+
+        vec3 sampleClip = startClip + rayClip * t;
+        if (sampleClip.z <= 0.15) break;
+
+        vec2 sampleUV = (sampleClip.xy / sampleClip.z) * 0.5 + 0.5;
+        #ifdef TAA_ENABLED
+            sampleUV += taaJitter * 0.5;
+        #endif
+        if (any(lessThan(sampleUV, vec2(0.001))) || any(greaterThanEqual(sampleUV, vec2(0.999)))) break;
+
+        ivec2 q = ivec2(sampleUV * res);
+        float sd = texelFetch(depthtex1, q, 0).r;
+        if (sd >= 0.999999) continue;
+
+        float sampleViewZ = linearizeDepth(sd);
+        float depthDiff = sampleClip.z - sampleViewZ;
+        if (depthDiff > 0.0) {
+            uint w1 = texelFetch(colortex1, q, 0).g;
+            if (((w1 >> 24u) & 1u) != 0u) continue; // never let first-person hand shadow the world
+
+            float travelDist = traceDist * t;
+            float stepZ = abs(rayClip.z) * (0.12 + u * (0.66 + 1.65 * u)) * invSamples;
+            float penumbra  = max(pixelWorldSize * 2.2, 0.010 + travelDist * 0.055);
+            float maxThick  = mix(max(3.5, viewZ * 0.12), 1.2, shadowCoverage);
+            float thickness = clamp(0.14 + travelDist * 0.45 + stepZ * 2.0, 0.14, maxThick);
+
+            float frontOcc = smoothstep(0.0, penumbra, depthDiff);
+            float backFade = 1.0 - smoothstep(thickness * 0.55, thickness, depthDiff);
+            maxOcc = max(maxOcc, frontOcc * backFade);
+            if (maxOcc > 0.99) break;
+        }
+    }
+
+    float occStrength = isFoliage ? 0.80 : 1.0;
+    return 1.0 - occStrength * maxOcc;
+}
+
 void main() {
     ivec2 px = ivec2(gl_GlobalInvocationID.xy);
     ivec2 res = ivec2(screenSize());
@@ -191,7 +267,14 @@ void main() {
     }
 
     GBufferMat mat = readGBuffer(px);
-    vec3 viewPos  = screenToView(vec3(uv, depth));
+    // gbuffers_hand does NOT apply TAA jitter, so never subtract taaJitter when unprojecting hand pixels!
+    vec3 viewPos;
+    if (mat.isHand) {
+        vec4 vp = gbufferProjectionInverse * vec4(vec3(uv, depth) * 2.0 - 1.0, 1.0);
+        viewPos = vp.xyz / vp.w;
+    } else {
+        viewPos = screenToView(vec3(uv, depth));
+    }
     vec3 worldPos = viewToWorld(viewPos);
     vec3 viewDir  = normalize(mat3(gbufferModelViewInverse) * (-viewPos));
 
@@ -203,25 +286,40 @@ void main() {
         -viewPos.z
     ));
 
-    // Direct Sunlight / Moonlight (Contact-Hardening Blue-Noise PCSS on Shadow Map)
-    // Smooth grazing-horizon fade on geoNormal prevents normal-map bumps from binary-flashing
-    // when sunlight skims parallel to a wall (dot(geoNormal, lightDir) ≈ 0).
+    // Direct Sunlight / Moonlight:
+    // - Inside shadowDistance: Contact-Hardening Blue-Noise PCSS + tight screen-space contact shadow.
+    // - Transition & beyond shadowDistance: smooth spherical handoff into distant screen-space sun
+    //   shadows * skyLight occlusion (eliminates visible shadow range circle all the way to horizon!).
     vec3 lightDir = getShadowLightDir();
     vec3 directCol = getDirectLightColor();
     float NdotL = max(dot(mat.shadeNormal, lightDir), 0.0);
     float geoHorizon = smoothstep(0.0, 0.08, dot(mat.geoNormal, lightDir));
-    vec3 shadowVis = (NdotL > 0.0 && geoHorizon > 0.0 && maxOf(directCol) > 1e-4)
-        ? sampleShadowPCSS(worldPos, mat.geoNormal, stbn2D(px, frameCounter, 7u).x) * geoHorizon
-        : vec3(0.0);
+    vec3 shadowVis = vec3(0.0);
+    if (NdotL > 0.0 && geoHorizon > 0.0 && maxOf(directCol) > 1e-4) {
+        vec2 shNoise = stbn2D(px, mat.isHand ? 0 : frameCounter, 7u);
+        float shadowCoverage = 0.0;
+        vec3 smVis = sampleShadowPCSS(worldPos, mat.geoNormal, shNoise.x, shadowCoverage);
+
+        float ssSun = 1.0;
+        if (!mat.isHand && (shadowCoverage < 0.99 || maxOf(smVis) > 0.01)) {
+            vec3 viewGeoN = normalize(mat3(gbufferModelView) * mat.geoNormal);
+            vec3 viewLightDir = normalize(mat3(gbufferModelView) * lightDir);
+            ssSun = traceSunScreenSpaceShadow(viewPos, viewGeoN, viewLightDir, shadowCoverage, mat.isHand, mat.sss > 0.1, shNoise.y);
+        }
+
+        vec3 distantVis = vec3(smoothstep(0.42, 0.94, mat.skyLight) * ssSun);
+        vec3 nearVis    = smVis * ssSun;
+        shadowVis = mix(distantVis, nearVis, shadowCoverage) * geoHorizon;
+    }
     vec3 directDiffuse = mat.albedo * INV_PI * directCol * (NdotL * shadowVis);
 
     // LabPBR 1.3 subsurface scattering (thin-slab back-lit transmission, Henyey-Greenstein forward lobe).
-    // Back-face visibility is evaluated against the shadow map from the opposite side of the slab.
+    // Offsets along lightDir to step cleanly through single-block leaves/vines without noisy self-shadow speckle.
     vec3 sssLight = vec3(0.0);
     if (mat.sss > 0.0 && maxOf(directCol) > 1e-4) {
         float backNL = dot(-mat.geoNormal, lightDir);
         if (backNL > 0.0) {
-            vec3 transVis = sampleShadowPCSS(worldPos, -mat.geoNormal, stbn2D(px, frameCounter, 11u).x);
+            vec3 transVis = sampleShadowFastRay(worldPos + lightDir * 0.45, lightDir, -lightDir);
             float mu = dot(-viewDir, lightDir);
             const float g = 0.55;
             float hg = (1.0 - g * g) / (4.0 * PI * pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5));
@@ -250,7 +348,15 @@ void main() {
         if (!isMetal) kD_direct = 1.0 - F;
     }
 
-    vec3 diffuseGI  = max(texelFetch(colortex3, px, 0).rgb, vec3(0.0));
+    // First-person hand bypasses temporal accumulation (SVGF & TAA) for zero swing ghosting,
+    // so shade hand indirect GI directly from smooth 2x2-bilinear L1 SH Radiance Cache (0% noise/jitter!).
+    vec3 diffuseGI;
+    if (mat.isHand) {
+        vec3 skyAmb = evalSky(mat.shadeNormal, false) * (0.15 + 0.85 * mat.skyLight);
+        diffuseGI = queryRadianceCacheSmooth(worldPos, mat.shadeNormal, skyAmb, 0u, vec2(0.5));
+    } else {
+        diffuseGI = max(texelFetch(colortex3, px, 0).rgb, vec3(0.0));
+    }
     vec3 specularGI = max(texelFetch(colortex4, px, 0).rgb, vec3(0.0));
     vec3 emissive   = (mat.emission > 0.0) ? (mat.albedo * (mat.emission * EMISSIVE_SCALE)) : vec3(0.0);
 
@@ -271,7 +377,7 @@ void main() {
     vec3 heldSpec    = vec3(0.0);
     if (heldBlockLightValue > 0 || heldBlockLightValue2 > 0) {
         vec3 viewGeoN = normalize(mat3(gbufferModelView) * mat.geoNormal);
-        float heldDither = stbn2D(px, frameCounter, 14u).x;
+        float heldDither = stbn2D(px, mat.isHand ? 0 : frameCounter, 14u).x;
         evalHeldHandLight(heldBlockLightValue,  heldItemId,  vec3( 0.45, 0.0, 0.0), mat, viewPos, viewDir,
                           F0_rgb, isMetal, NdotV, viewGeoN, heldDither, heldDiffuse, heldSpec);
         evalHeldHandLight(heldBlockLightValue2, heldItemId2, vec3(-0.45, 0.0, 0.0), mat, viewPos, viewDir,

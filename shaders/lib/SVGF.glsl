@@ -97,8 +97,16 @@ vec4 fetchHistoryFast4(sampler2D tex, vec2 uv, ivec2 res, ivec2 tileOff) {
     sum += max(texelFetch(tex, ivec2(x2, y3), 0).rgb, vec3(0.0)) * (w2.x * w3.y);
 
     float wNorm = 1.0 - (w0.x + w3.x) * (w0.y + w3.y);
+    vec3 catmull = sum / max(wNorm, 1e-4);
+    // Anti-ringing clamp against the center 2x2 neighborhood eliminates bicubic overshoot halos on sharp edges!
+    vec3 c11 = max(t11.rgb, vec3(0.0));
+    vec3 c21 = max(t21.rgb, vec3(0.0));
+    vec3 c12 = max(t12.rgb, vec3(0.0));
+    vec3 c22 = max(t22.rgb, vec3(0.0));
+    vec3 minC = min(min(c11, c21), min(c12, c22));
+    vec3 maxC = max(max(c11, c21), max(c12, c22));
     float aBilin = mix(mix(t11.a, t21.a, f.x), mix(t12.a, t22.a, f.x), f.y);
-    return vec4(max(sum / max(wNorm, 1e-4), vec3(0.0)), max(aBilin, 0.0));
+    return vec4(clamp(catmull, minC, maxC), max(aBilin, 0.0));
 }
 
 // Geometry-aware 3x3 RCRS firefly despike (preserves chromaticity) with depth-only fallback

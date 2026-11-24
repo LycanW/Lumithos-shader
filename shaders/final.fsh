@@ -16,21 +16,28 @@
     const bool colortex5Clear = false;
 */
 
-#include "/lib/Resources.glsl"
+#include "/lib/Tonemap.glsl"
 
 uniform sampler2D taaHistTex;
+uniform sampler2D scratchTex;
+uniform sampler2D exposureTex;
 
 in vec2 vUV;
 layout(location = 0) out vec4 fragColor;
 
-// ACES Filmic Tonemap (Narkowicz 2015)
-vec3 tonemapACES(vec3 x) {
-    const float a = 2.51;
-    const float b = 0.03;
-    const float c = 2.43;
-    const float d = 0.59;
-    const float e = 0.14;
-    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
+vec3 sampleBloomBilinear(ivec2 px, ivec2 res) {
+    BloomRect u0 = getBloomRect(0, true, res);
+    vec2 uv = (vec2(px) + 0.5) / vec2(res);
+    vec2 pos = uv * vec2(u0.size) - 0.5;
+    ivec2 base = ivec2(floor(pos));
+    vec2 f = pos - vec2(base);
+    ivec2 maxP = u0.size - 1;
+
+    vec3 c00 = max(texelFetch(scratchTex, u0.origin + clamp(base + ivec2(0, 0), ivec2(0), maxP), 0).rgb, vec3(0.0));
+    vec3 c10 = max(texelFetch(scratchTex, u0.origin + clamp(base + ivec2(1, 0), ivec2(0), maxP), 0).rgb, vec3(0.0));
+    vec3 c01 = max(texelFetch(scratchTex, u0.origin + clamp(base + ivec2(0, 1), ivec2(0), maxP), 0).rgb, vec3(0.0));
+    vec3 c11 = max(texelFetch(scratchTex, u0.origin + clamp(base + ivec2(1, 1), ivec2(0), maxP), 0).rgb, vec3(0.0));
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 }
 
 void main() {
@@ -38,10 +45,28 @@ void main() {
     ivec2 px = clamp(ivec2(gl_FragCoord.xy), ivec2(0), res - 1);
     ivec2 currOff = ivec2((frameCounter & 1) * res.x, 0);
     vec3 hdr = max(texelFetch(taaHistTex, px + currOff, 0).rgb, vec3(0.0));
+    if (any(isnan(hdr)) || any(isinf(hdr))) hdr = vec3(0.0);
+
     #if DEBUG_VIEW == 5
         vec3 ldr = hdr;
+    #elif DEBUG_VIEW != 0
+        vec3 ldr = applyTonemap(hdr * float(EXPOSURE));
     #else
-        vec3 ldr = tonemapACES(hdr * float(EXPOSURE));
+        #ifdef BLOOM_ENABLED
+            vec3 bloom = sampleBloomBilinear(px, res);
+            hdr = mix(hdr, bloom, float(BLOOM_STRENGTH));
+        #endif
+
+        float expMul = float(EXPOSURE);
+        #ifdef AUTO_EXPOSURE
+            float autoExp = texelFetch(exposureTex, ivec2(0), 0).g;
+            if (autoExp > 0.05 && !isnan(autoExp) && !isinf(autoExp)) {
+                expMul *= autoExp;
+            }
+        #endif
+
+        vec3 ldr = applyTonemap(hdr * expMul);
     #endif
+
     fragColor = vec4(linearToSrgb(ldr), 1.0);
 }
