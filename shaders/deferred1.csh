@@ -19,8 +19,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(rgba16f) uniform image2D colorimg3;
 
 void main() {
-    uint lCount = lightList.lightCount;
-    if (lCount == 0u || lCount > MAX_SCENE_LIGHTS) return;
+    if (lightList.lightCount == 0u) return;
 
     ivec2 tid = ivec2(gl_GlobalInvocationID.xy);
     ivec2 res = ivec2(screenSize());
@@ -56,9 +55,9 @@ void main() {
     vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, geoNormal, toCam, camDist);
 
     vec3 neeDir = vec3(0.0, 1.0, 0.0);
-    vec3 neeRad = sampleDirectLightsNEE(rayOrig, shadeNormal, false, 8, stbn2D(bnPx, bnSeq, 8u), neeDir);
+    vec3 neeRad = sampleDirectLightsNEE(rayOrig, shadeNormal, false, 16, stbn2D(bnPx, bnSeq, 8u), neeDir);
     if (any(isnan(neeRad)) || any(isinf(neeRad)) || maxOf(neeRad) <= 1e-5) return;
 
     vec4 prev = imageLoad(colorimg3, px);
-    imageStore(colorimg3, px, vec4(min(prev.rgb + neeRad, vec3(28.0)), prev.a));
+    imageStore(colorimg3, px, vec4(min(prev.rgb + min(neeRad, vec3(16.0)), vec3(24.0)), prev.a));
 }

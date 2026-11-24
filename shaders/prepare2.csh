@@ -55,8 +55,17 @@ void main() {
             vec3 albLin = srgbToLinear(tex.rgb * tintSrgb);
             float emitStr = 0.0;
             vec3 emitCol = evalEmitterColor(albLin, blockEmit, 0.0, emitStr);
-            lightList.lights[idx].posAndPower  = vec4(vec3(v) + 0.5, emitStr);
+            vec3 finalPos = vec3(v) + 0.5;
+            lightList.lights[idx].posAndPower  = vec4(finalPos, emitStr);
             lightList.lights[idx].colorAndMeta = vec4(emitCol, 0.5);
+            if (emitStr > 1e-4) {
+                ivec3 lc = clamp(ivec3(floor(finalPos * (1.0 / 32.0))), ivec3(0), ivec3(LIGHT_CELL_XZ - 1, LIGHT_CELL_Y - 1, LIGHT_CELL_XZ - 1));
+                uint cIdx = uint(lc.x + lc.z * LIGHT_CELL_XZ + lc.y * (LIGHT_CELL_XZ * LIGHT_CELL_XZ));
+                uint cSlot = atomicAdd(lightList.cellCount[cIdx], 1u);
+                if (cSlot < LIGHT_CELL_CAP) {
+                    lightList.cellLights[cIdx * LIGHT_CELL_CAP + cSlot] = idx;
+                }
+            }
             return;
         }
 
@@ -96,5 +105,13 @@ void main() {
         }
         lightList.lights[idx].posAndPower  = vec4(bestPos, bestStr);
         lightList.lights[idx].colorAndMeta = vec4(bestCol, 0.18);
+        if (bestStr > 1e-4) {
+            ivec3 lc = clamp(ivec3(floor(bestPos * (1.0 / 32.0))), ivec3(0), ivec3(LIGHT_CELL_XZ - 1, LIGHT_CELL_Y - 1, LIGHT_CELL_XZ - 1));
+            uint cIdx = uint(lc.x + lc.z * LIGHT_CELL_XZ + lc.y * (LIGHT_CELL_XZ * LIGHT_CELL_XZ));
+            uint cSlot = atomicAdd(lightList.cellCount[cIdx], 1u);
+            if (cSlot < LIGHT_CELL_CAP) {
+                lightList.cellLights[cIdx * LIGHT_CELL_CAP + cSlot] = idx;
+            }
+        }
     }
 }

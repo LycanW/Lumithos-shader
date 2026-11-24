@@ -535,17 +535,48 @@ vec3 traceVisibility(vec3 worldOrigin, vec3 targetVoxelPos, ivec3 targetVoxel, i
     return throughput;
 }
 
-// 1-SPP RIS (Weighted Reservoir Sampling) Next-Event Estimation from compact Emissive Voxel LightList:
-// Evaluates candidate lights with exact inverse-square falloff + smooth Minecraft light-level radius,
-// selects 1 light proportional to unshadowed irradiance using spatiotemporal blue noise, and casts
-// 1 visibility + stained-glass transmission ray -> zero multi-lantern fireflies & blotches at 1 SPP!
+// 1-SPP Local-Grid RIS (Weighted Reservoir Sampling) Next-Event Estimation:
+// Queries ONLY the 2x2x2 local 32^3 macro-cells covering [vPos-16, vPos+16] (100% exact for Minecraft's
+// 16-block light radius!), eliminating global stepF = 150x fireflies in giant multi-chandelier halls!
 vec3 sampleDirectLightsNEE(vec3 worldPos, vec3 normal, bool isSphere, int maxCandidates, vec2 bn, out vec3 outLightDir) {
     outLightDir = vec3(0.0, 1.0, 0.0);
-    uint total = lightList.lightCount;
-    if (total == 0u || total > MAX_SCENE_LIGHTS) return vec3(0.0);
+    if (lightList.lightCount == 0u) return vec3(0.0);
 
-    uint nCand = min(total, uint(maxCandidates));
-    float stepF = float(total) / float(nCand);
+    vec3 vPos = worldToVoxelPos(worldPos);
+    ivec3 c0 = ivec3(floor((vPos - 16.0) * (1.0 / 32.0)));
+
+    uint cIdxs[8];
+    uint cCounts[8];
+    float cScales[8];
+    uint localTotal = 0u;
+    int nCells = 0;
+
+    for (int dz = 0; dz < 2; ++dz) {
+        int cz = c0.z + dz;
+        if (cz < 0 || cz >= LIGHT_CELL_XZ) continue;
+        for (int dy = 0; dy < 2; ++dy) {
+            int cy = c0.y + dy;
+            if (cy < 0 || cy >= LIGHT_CELL_Y) continue;
+            for (int dx = 0; dx < 2; ++dx) {
+                int cx = c0.x + dx;
+                if (cx < 0 || cx >= LIGHT_CELL_XZ) continue;
+                uint ci = uint(cx + cz * LIGHT_CELL_XZ + cy * (LIGHT_CELL_XZ * LIGHT_CELL_XZ));
+                uint rawCnt = lightList.cellCount[ci];
+                if (rawCnt > 0u) {
+                    uint cnt = min(rawCnt, LIGHT_CELL_CAP);
+                    cIdxs[nCells]   = ci;
+                    cCounts[nCells] = cnt;
+                    cScales[nCells] = float(rawCnt) / float(cnt);
+                    localTotal += cnt;
+                    ++nCells;
+                }
+            }
+        }
+    }
+    if (localTotal == 0u) return vec3(0.0);
+
+    uint nCand = min(localTotal, uint(maxCandidates));
+    float stepF = float(localTotal) / float(nCand);
     float startF = bn.x * stepF;
 
     float wSum = 0.0;
@@ -555,13 +586,25 @@ vec3 sampleDirectLightsNEE(vec3 worldPos, vec3 normal, bool isSphere, int maxCan
     vec3 selTargetVoxPos = vec3(0.0);
 
     for (uint i = 0u; i < nCand; ++i) {
-        uint idx = uint(startF + float(i) * stepF) % total;
+        uint target = uint(startF + float(i) * stepF) % localTotal;
+        uint idx = 0u;
+        float cellScale = 1.0;
+        uint rem = target;
+        for (int c = 0; c < nCells; ++c) {
+            if (rem < cCounts[c]) {
+                idx = lightList.cellLights[cIdxs[c] * LIGHT_CELL_CAP + rem];
+                cellScale = cScales[c];
+                break;
+            }
+            rem -= cCounts[c];
+        }
+
         SceneLight L = lightList.lights[idx];
         vec3 lWorld = voxelToWorldPos(L.posAndPower.xyz);
         vec3 toL = lWorld - worldPos;
         float dist2 = dot(toL, toL);
         float emitStr = L.posAndPower.w;
-        float maxRange = max(emitStr * 18.0, 4.0);
+        float maxRange = clamp(emitStr * 16.0, 4.0, 16.0);
         if (dist2 >= maxRange * maxRange) continue;
 
         float dist = sqrt(max(dist2, 1e-6));
@@ -575,7 +618,7 @@ vec3 sampleDirectLightsNEE(vec3 worldPos, vec3 normal, bool isSphere, int maxCan
         win *= win;
         float atten = win / (dist2 + 0.35);
 
-        vec3 contrib = L.colorAndMeta.rgb * (emitStr * 4.2 * atten * geom);
+        vec3 contrib = L.colorAndMeta.rgb * (emitStr * 4.2 * atten * geom * cellScale);
         float w = luma(contrib);
         if (w <= 1e-6) continue;
 

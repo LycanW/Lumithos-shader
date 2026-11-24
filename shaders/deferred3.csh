@@ -171,10 +171,11 @@ void main() {
         if (response > 0.65) slowLuma = fastLuma;
     }
 
-    // Soft temporal firefly guard on settled pixels prevents isolated 20x spikes from pulsing.
+    // Soft temporal firefly guard activates briskly (oldAge >= 4) so isolated 1-SPP spikes
+    // on intricate 3D latticework / armor stands never persist for hundreds of frames.
     vec3 safeCurr = curr;
-    if (oldAge >= 12.0 && response < 0.25) {
-        float maxSettledLuma = max(luma(oldSlow) * 12.0 + 2.5, 4.0);
+    if (oldAge >= 4.0 && response < 0.25) {
+        float maxSettledLuma = max(luma(oldSlow) * 5.0 + 0.6, 1.2);
         if (currLuma > maxSettledLuma) {
             safeCurr *= maxSettledLuma / max(currLuma, 1e-6);
         }

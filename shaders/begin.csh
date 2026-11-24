@@ -17,6 +17,9 @@ void main() {
         primPool.primCount = 0u;
         lightList.lightCount = 0u;
     }
+    if (v.y == 0 && v.z == 0 && v.x < int(LIGHT_CELL_TOTAL)) {
+        lightList.cellCount[v.x] = 0u;
+    }
 
     // 100% uniform across the entire 8x8x8 workgroup (half of a 16x16x16 super-brick)!
     if (texelFetch(superOccTex, v >> 4, 0).r == 0u) return;

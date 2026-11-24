@@ -12,7 +12,11 @@
 
 #define MAX_PRIMITIVES     1048576u
 #define PRIM_END           0xffffffffu
-#define MAX_SCENE_LIGHTS   2048u
+#define MAX_SCENE_LIGHTS   4096u
+#define LIGHT_CELL_XZ      5
+#define LIGHT_CELL_Y       3
+#define LIGHT_CELL_TOTAL   75u
+#define LIGHT_CELL_CAP     256u
 
 // ---- O(1) 3-Cascade Toroidal 3D Clipmap Radiance Cache ----
 #define RC_XZ              64

@@ -96,7 +96,7 @@ void main() {
     float pdfMix = useGuide ? mix(pdfCos, pdfVMF(rayDir, guideDir, guideKappa), guideProb) : pdfCos;
     float weight = pdfCos / max(pdfMix, 1e-5);
 
-    bool useNEE = (lightList.lightCount > 0u && lightList.lightCount <= MAX_SCENE_LIGHTS);
+    bool useNEE = (lightList.lightCount > 0u);
 
     vec3 radiance = vec3(0.0);
     float hitDist = 64.0;
@@ -148,7 +148,7 @@ void main() {
         }
     }
 
-    radiance = min(max(radiance * min(weight, 3.0), vec3(0.0)), vec3(28.0));
+    radiance = min(max(radiance * min(weight, 2.0), vec3(0.0)), vec3(16.0));
     if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
 
     imageStore(colorimg3, px, vec4(radiance, hitDist));

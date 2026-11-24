@@ -110,86 +110,88 @@ vec3 clipAABB(vec3 aabbMin, vec3 aabbMax, vec3 prev) {
     return (maxUnit > 1.0) ? (center + vClip / maxUnit) : prev;
 }
 
-// Geometry-aware 3x3 RCRS firefly despike (preserves chromaticity).
+// Geometry-aware 3x3 RCRS firefly despike (preserves chromaticity) with depth-only fallback
+// for intricate 3D latticework / armor stands / curved geometry where <3 neighbors share the same normal!
 vec3 despike3x3(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol, vec3 geoN, vec3 shadeN, float centerDepth, float ratio, float floorVal) {
     float cLuma = luma(centerCol);
-    float maxN = 0.0;
-    float secondMax = 0.0;
-    int valid = 0;
+    float maxN = 0.0, secondMax = 0.0;
+    float dMaxN = 0.0, dSecondMax = 0.0;
+    int valid = 0, dValid = 0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             if (x == 0 && y == 0) continue;
             ivec2 q = px + ivec2(x, y);
             if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
             float qd = texelFetch(depthtex1, q, 0).r;
-            if (qd >= 0.999999 || abs(qd - centerDepth) > 0.015 * max(centerDepth, 0.01)) continue;
-            vec3 qGeoN, qShadeN;
-            readGBufferNormals(q, qGeoN, qShadeN);
-            if (dot(geoN, qGeoN) < 0.9 || dot(shadeN, qShadeN) < 0.45) continue;
+            if (qd >= 0.999999 || abs(qd - centerDepth) > 0.020 * max(centerDepth, 0.01)) continue;
             vec4 qt = texelFetch(noisyTex, q, 0);
             if (qt.a < 0.0) continue;
             vec3 qc = max(qt.rgb, vec3(0.0));
             if (any(isnan(qc)) || any(isinf(qc))) continue;
             float ql = luma(qc);
-            if (ql > maxN) {
-                secondMax = maxN;
-                maxN = ql;
-            } else if (ql > secondMax) {
-                secondMax = ql;
-            }
+            if (ql > dMaxN) { dSecondMax = dMaxN; dMaxN = ql; }
+            else if (ql > dSecondMax) { dSecondMax = ql; }
+            ++dValid;
+
+            vec3 qGeoN, qShadeN;
+            readGBufferNormals(q, qGeoN, qShadeN);
+            if (dot(geoN, qGeoN) < 0.9 || dot(shadeN, qShadeN) < 0.45) continue;
+            if (ql > maxN) { secondMax = maxN; maxN = ql; }
+            else if (ql > secondMax) { secondMax = ql; }
             ++valid;
         }
     }
     if (valid >= 3) {
-        // Use 2nd-brightest neighbor so even adjacent firefly pairs get suppressed cleanly.
         float refLuma = (valid >= 5) ? secondMax : maxN;
         float lim = refLuma * ratio + floorVal;
-        if (cLuma > lim) {
-            return centerCol * (lim / max(cLuma, 1e-6));
-        }
+        if (cLuma > lim) return centerCol * (lim / max(cLuma, 1e-6));
+    } else if (dValid >= 3) {
+        float refLuma = (dValid >= 5) ? dSecondMax : dMaxN;
+        float lim = refLuma * ratio + floorVal;
+        if (cLuma > lim) return centerCol * (lim / max(cLuma, 1e-6));
     }
     return centerCol;
 }
 
-// Same-parity 8-neighbor RCRS firefly despike for checkerboard-traced buffers:
-// Samples ONLY the 8 nearest same-parity traced pixels ((±1,±1) and (±2,0),(0,±2)),
-// never touching untraced axial neighbors!
+// Same-parity 8-neighbor RCRS firefly despike for checkerboard-traced buffers (with depth-only fallback!).
 vec3 despikeCheckerboard(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol, vec3 geoN, vec3 shadeN, float centerDepth, float ratio, float floorVal) {
     const ivec2 offs[8] = ivec2[8](
         ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1),
         ivec2(-2,  0), ivec2(2,  0), ivec2( 0,-2), ivec2(0, 2)
     );
     float cLuma = luma(centerCol);
-    float maxN = 0.0;
-    float secondMax = 0.0;
-    int valid = 0;
+    float maxN = 0.0, secondMax = 0.0;
+    float dMaxN = 0.0, dSecondMax = 0.0;
+    int valid = 0, dValid = 0;
     for (int i = 0; i < 8; ++i) {
         ivec2 q = px + offs[i];
         if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
         float qd = texelFetch(depthtex1, q, 0).r;
-        if (qd >= 0.999999 || abs(qd - centerDepth) > 0.018 * max(centerDepth, 0.01)) continue;
-        vec3 qGeoN, qShadeN;
-        readGBufferNormals(q, qGeoN, qShadeN);
-        if (dot(geoN, qGeoN) < 0.9 || dot(shadeN, qShadeN) < 0.45) continue;
+        if (qd >= 0.999999 || abs(qd - centerDepth) > 0.022 * max(centerDepth, 0.01)) continue;
         vec4 qt = texelFetch(noisyTex, q, 0);
         if (qt.a < 0.0) continue;
         vec3 qc = max(qt.rgb, vec3(0.0));
         if (any(isnan(qc)) || any(isinf(qc))) continue;
         float ql = luma(qc);
-        if (ql > maxN) {
-            secondMax = maxN;
-            maxN = ql;
-        } else if (ql > secondMax) {
-            secondMax = ql;
-        }
+        if (ql > dMaxN) { dSecondMax = dMaxN; dMaxN = ql; }
+        else if (ql > dSecondMax) { dSecondMax = ql; }
+        ++dValid;
+
+        vec3 qGeoN, qShadeN;
+        readGBufferNormals(q, qGeoN, qShadeN);
+        if (dot(geoN, qGeoN) < 0.9 || dot(shadeN, qShadeN) < 0.45) continue;
+        if (ql > maxN) { secondMax = maxN; maxN = ql; }
+        else if (ql > secondMax) { secondMax = ql; }
         ++valid;
     }
     if (valid >= 3) {
         float refLuma = (valid >= 5) ? secondMax : maxN;
         float lim = refLuma * ratio + floorVal;
-        if (cLuma > lim) {
-            return centerCol * (lim / max(cLuma, 1e-6));
-        }
+        if (cLuma > lim) return centerCol * (lim / max(cLuma, 1e-6));
+    } else if (dValid >= 3) {
+        float refLuma = (dValid >= 5) ? dSecondMax : dMaxN;
+        float lim = refLuma * ratio + floorVal;
+        if (cLuma > lim) return centerCol * (lim / max(cLuma, 1e-6));
     }
     return centerCol;
 }
@@ -270,40 +272,43 @@ ivec2 diffuseQuarterOffset(int frame) {
     return ivec2(((f >> 1) ^ (f & 1)) & 1, f & 1);
 }
 
-// Same-phase 8-neighbor (stride-2 3x3) RCRS firefly despike for 2x2 quarter-res traced buffers.
+// Same-phase 8-neighbor (stride-2 3x3) RCRS firefly despike for 2x2 quarter-res traced buffers
+// with depth-only fallback for intricate 3D latticework / armor stands / stairs!
 vec3 despikeQuarter(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol, vec3 geoN, vec3 shadeN, float centerDepth, float ratio, float floorVal) {
     float cLuma = luma(centerCol);
-    float maxN = 0.0;
-    float secondMax = 0.0;
-    int valid = 0;
+    float maxN = 0.0, secondMax = 0.0;
+    float dMaxN = 0.0, dSecondMax = 0.0;
+    int valid = 0, dValid = 0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             if (x == 0 && y == 0) continue;
             ivec2 q = px + ivec2(x, y) * 2;
             if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
             float qd = texelFetch(depthtex1, q, 0).r;
-            if (qd >= 0.999999 || abs(qd - centerDepth) > 0.022 * max(centerDepth, 0.01)) continue;
-            vec3 qGeoN, qShadeN;
-            readGBufferNormals(q, qGeoN, qShadeN);
-            if (dot(geoN, qGeoN) < 0.9 || dot(shadeN, qShadeN) < 0.45) continue;
+            if (qd >= 0.999999 || abs(qd - centerDepth) > 0.025 * max(centerDepth, 0.01)) continue;
             vec3 qc = max(texelFetch(noisyTex, q, 0).rgb, vec3(0.0));
             if (any(isnan(qc)) || any(isinf(qc))) continue;
             float ql = luma(qc);
-            if (ql > maxN) {
-                secondMax = maxN;
-                maxN = ql;
-            } else if (ql > secondMax) {
-                secondMax = ql;
-            }
+            if (ql > dMaxN) { dSecondMax = dMaxN; dMaxN = ql; }
+            else if (ql > dSecondMax) { dSecondMax = ql; }
+            ++dValid;
+
+            vec3 qGeoN, qShadeN;
+            readGBufferNormals(q, qGeoN, qShadeN);
+            if (dot(geoN, qGeoN) < 0.9 || dot(shadeN, qShadeN) < 0.45) continue;
+            if (ql > maxN) { secondMax = maxN; maxN = ql; }
+            else if (ql > secondMax) { secondMax = ql; }
             ++valid;
         }
     }
     if (valid >= 3) {
         float refLuma = (valid >= 5) ? secondMax : maxN;
         float lim = refLuma * ratio + floorVal;
-        if (cLuma > lim) {
-            return centerCol * (lim / max(cLuma, 1e-6));
-        }
+        if (cLuma > lim) return centerCol * (lim / max(cLuma, 1e-6));
+    } else if (dValid >= 3) {
+        float refLuma = (dValid >= 5) ? dSecondMax : dMaxN;
+        float lim = refLuma * ratio + floorVal;
+        if (cLuma > lim) return centerCol * (lim / max(cLuma, 1e-6));
     }
     return centerCol;
 }
@@ -318,36 +323,69 @@ vec3 quarterBilinearFill(sampler2D noisyTex, ivec2 px, ivec2 res, ivec2 qOff, ve
     vec3 fallbackCol = vec3(0.0);
     float bestFallW = -1.0;
 
-    for (int j = 0; j < 2; ++j) {
-        for (int i = 0; i < 2; ++i) {
-            ivec2 q = qBase + ivec2(i * 2, j * 2);
-            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
-            float qd = texelFetch(depthtex1, q, 0).r;
-            if (qd >= 0.999999) continue;
+    // Pre-fetch the 4 surrounding traced corners and cap any isolated single-corner firefly
+    // so raw spikes never smear into 2x2 bright blocks on disoccluded narrow geometry!
+    vec3 cCols[4];
+    float cLumas[4];
+    float cDepths[4];
+    bool cValid[4];
+    float minL = 1e6, secondMinL = 1e6;
+    int validCnt = 0;
 
-            vec3 qc = max(texelFetch(noisyTex, q, 0).rgb, vec3(0.0));
-            if (any(isnan(qc)) || any(isinf(qc))) continue;
+    for (int idx = 0; idx < 4; ++idx) {
+        int i = idx & 1;
+        int j = idx >> 1;
+        ivec2 q = qBase + ivec2(i * 2, j * 2);
+        cValid[idx] = false;
+        cCols[idx] = vec3(0.0);
+        cLumas[idx] = 0.0;
+        cDepths[idx] = 1.0;
+        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
+        float qd = texelFetch(depthtex1, q, 0).r;
+        if (qd >= 0.999999) continue;
+        vec3 qc = max(texelFetch(noisyTex, q, 0).rgb, vec3(0.0));
+        if (any(isnan(qc)) || any(isinf(qc))) continue;
+        float ql = luma(qc);
+        cValid[idx] = true;
+        cCols[idx] = qc;
+        cLumas[idx] = ql;
+        cDepths[idx] = qd;
+        if (ql < minL) { secondMinL = minL; minL = ql; }
+        else if (ql < secondMinL) { secondMinL = ql; }
+        ++validCnt;
+    }
+    float cornerCap = (validCnt >= 3) ? (secondMinL * 5.0 + 0.8) : 16.0;
 
-            vec3 qGeoN, qShadeN;
-            readGBufferNormals(q, qGeoN, qShadeN);
-            float bw = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
-            float dGeo = dot(geoN, qGeoN);
-            float depthDiff = abs(qd - centerDepth) / max(centerDepth, 0.01);
-            float fallW = (max(dGeo, 0.0) + 0.05) * (bw + 0.05) / (1.0 + depthDiff * 40.0);
-            if (fallW > bestFallW) {
-                bestFallW = fallW;
-                fallbackCol = qc;
-            }
-
-            if (dGeo < 0.90 || depthDiff > 0.03) continue;
-            float dShade = max(dot(shadeN, qShadeN), 0.0);
-            if (dShade < 0.45) continue;
-
-            float s2 = dShade * dShade;
-            float w = max(bw, 0.05) * (s2 * s2);
-            sumCol += w * qc;
-            sumW   += w;
+    for (int idx = 0; idx < 4; ++idx) {
+        if (!cValid[idx]) continue;
+        int i = idx & 1;
+        int j = idx >> 1;
+        ivec2 q = qBase + ivec2(i * 2, j * 2);
+        float qd = cDepths[idx];
+        vec3 qc = cCols[idx];
+        if (cLumas[idx] > cornerCap) {
+            qc *= cornerCap / max(cLumas[idx], 1e-6);
         }
+
+        vec3 qGeoN, qShadeN;
+        readGBufferNormals(q, qGeoN, qShadeN);
+        float bw = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
+        float dGeo = dot(geoN, qGeoN);
+        float depthDiff = abs(qd - centerDepth) / max(centerDepth, 0.01);
+        float fallW = (max(dGeo, 0.0) + 0.05) * (bw + 0.05) / (1.0 + depthDiff * 40.0);
+        if (fallW > bestFallW) {
+            bestFallW = fallW;
+            fallbackCol = qc;
+        }
+
+        if (dGeo < 0.90 || depthDiff > 0.03) continue;
+        float dShade = max(dot(shadeN, qShadeN), 0.0);
+        if (dShade < 0.45) continue;
+
+        float s2 = dShade * dShade;
+        float w = max(bw, 0.05) * (s2 * s2);
+        sumCol += w * qc;
+        sumW   += w;
     }
     if (sumW > 1e-5) return sumCol / sumW;
     return (bestFallW >= 0.0) ? fallbackCol : vec3(0.0);

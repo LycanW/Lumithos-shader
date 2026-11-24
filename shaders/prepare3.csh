@@ -55,11 +55,11 @@ void main() {
         rayOrig = probeWorld;
     }
 
-    bool useNEE = (lightList.lightCount > 0u && lightList.lightCount <= MAX_SCENE_LIGHTS);
+    bool useNEE = (lightList.lightCount > 0u);
 
-    // 1) 1-SPP RIS Next-Event Estimation for all block light sources (torches, lanterns, lamps, lava).
+    // 1) 1-SPP Local-Grid RIS Next-Event Estimation for all block light sources (torches, lanterns, lamps, lava).
     vec3 neeDir = vec3(0.0, 1.0, 0.0);
-    vec3 neeRad = useNEE ? sampleDirectLightsNEE(rayOrig, vec3(0.0, 1.0, 0.0), true, 16, uNee3.xy, neeDir) : vec3(0.0);
+    vec3 neeRad = useNEE ? sampleDirectLightsNEE(rayOrig, vec3(0.0, 1.0, 0.0), true, 24, uNee3.xy, neeDir) : vec3(0.0);
     neeRad = min(max(neeRad, vec3(0.0)), vec3(16.0));
     if (any(isnan(neeRad)) || any(isinf(neeRad))) neeRad = vec3(0.0);
     vec3 neeYcc = rgbToYCoCg(neeRad);

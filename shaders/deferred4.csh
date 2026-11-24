@@ -27,26 +27,39 @@ void main() {
     uint g1 = texelFetch(colortex2, px, 0).r;
     vec3 centerGeoN = unpackNormal16(g1 & 65535u);
 
-    // Leave-One-Out geometry-aware 3x3 (stride 2) spatial moment estimation:
+    // Leave-One-Out geometry-aware 3x3 spatial moment estimation (stride 1 catches 1-2px narrow bars,
+    // latticework, armor stands, and stair edges that stride-2 jumps right over!), with depth-only fallback!
     vec2 moments = vec2(0.0);
     float wSum = 0.0;
+    vec2 dMoments = vec2(0.0);
+    float dWSum = 0.0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             if (x == 0 && y == 0) continue;
-            ivec2 q = clamp(px + ivec2(x, y) * 2, ivec2(0), res - 1);
+            ivec2 q = clamp(px + ivec2(x, y), ivec2(0), res - 1);
             float qd = texelFetch(depthtex1, q, 0).r;
             if (qd >= 0.999999) continue;
+
+            float ql = luma(max(texelFetch(scratchTex, q, 0).rgb, vec3(0.0)));
+            if (abs(qd - depth) <= 0.025 * max(depth, 0.01)) {
+                dMoments += vec2(ql, ql * ql);
+                dWSum += 1.0;
+            }
             uint qg1 = texelFetch(colortex2, q, 0).r;
             vec3 qGeoN = unpackNormal16(qg1 & 65535u);
             if (dot(centerGeoN, qGeoN) < 0.85) continue;
 
-            float ql = luma(max(texelFetch(scratchTex, q, 0).rgb, vec3(0.0)));
             moments += vec2(ql, ql * ql);
             wSum += 1.0;
         }
     }
     float cLuma = luma(rad);
-    if (wSum > 0.5) {
+    if (wSum >= 3.0) {
+        moments /= wSum;
+    } else if (dWSum >= 2.0) {
+        moments = dMoments / dWSum;
+        wSum = max(dWSum, 3.0);
+    } else if (wSum > 0.5) {
         moments /= wSum;
     } else {
         moments = vec2(cLuma, cLuma * cLuma);
