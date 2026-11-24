@@ -14,6 +14,7 @@ void main() {
 
     if (v == ivec3(0)) {
         primPool.primCount = 0u;
+        lightList.lightCount = 0u;
     }
 
     if (imageLoad(voxelGridImg, v).r != 0u) {

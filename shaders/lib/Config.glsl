@@ -12,6 +12,7 @@
 
 #define MAX_PRIMITIVES     1048576u
 #define PRIM_END           0xffffffffu
+#define MAX_SCENE_LIGHTS   2048u
 
 // ---- O(1) 3-Cascade Toroidal 3D Clipmap Radiance Cache ----
 #define RC_XZ              64
@@ -52,6 +53,7 @@ const float sunPathRotation     = -35.0;
 const float ambientOcclusionLevel = 0.0;
 const bool  shadowtex0Nearest   = true;
 const bool  shadowtex1Nearest   = true;
+const bool  shadowcolor0Nearest = true;
 
 /*
     const int colortex0Format = RGBA16F;  // lit scene / final

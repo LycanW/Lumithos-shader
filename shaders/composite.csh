@@ -64,7 +64,7 @@ void main() {
         // reflection position `centerWorld + normalize(centerWorld) * hitDist`.
         if (centerDepth < 0.999999 && abs(centerDepth - bestDepth) < 0.002) {
             GBufferMat mat = readGBuffer(px);
-            if (mat.roughness < 0.10 && !mat.isHand) {
+            if (mat.roughness < 0.08 && dot(mat.shadeNormal, mat.geoNormal) > 0.998 && !mat.isHand) {
                 float hitDist = texelFetch(colortex4, px, 0).a;
                 if (hitDist > 0.05 && hitDist < 256.0) {
                     vec3 centerWorld = viewToWorld(screenToView(vec3(uv, centerDepth)));

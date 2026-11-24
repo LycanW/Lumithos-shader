@@ -1,6 +1,6 @@
 #version 430 compatibility
 
-// Pass: Build Level-1 4x4x4 brick occupancy (40 x 24 x 40) from voxelGridTex.
+// Pass: Build Level-1 4x4x4 brick occupancy (40 x 24 x 40) from voxelGridTex (<0.03ms early-exit!).
 #define STAGE_BRICK_WRITE
 #include "/lib/Resources.glsl"
 

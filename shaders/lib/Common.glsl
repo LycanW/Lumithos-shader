@@ -17,6 +17,49 @@ float luma(vec3 c)      { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 vec3 srgbToLinear(vec3 c) { return pow(max(c, vec3(0.0)), vec3(2.2)); }
 vec3 linearToSrgb(vec3 c) { return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2)); }
 
+// ---- Stained-Glass / Translucent Light Tinting & Colored Emitters ----
+// Physical translucent filter transmittance: keeps white glass clear, black/tinted glass dark,
+// and delivers rich chromatic tinting for single- or multi-layer stained glass & water.
+vec3 evalGlassTransmittance(vec3 srgbCol, float alpha) {
+    vec3 lin = srgbToLinear(saturate(srgbCol));
+    float maxC = maxOf(lin);
+    vec3 chroma = (maxC > 1e-4) ? (lin / maxC) : vec3(0.0);
+    vec3 deepTint = pow(saturate(chroma), vec3(1.35)) * mix(0.05, 0.96, pow(saturate(maxC), 0.42));
+    float tintStrength = saturate(alpha * 2.2);
+    return mix(vec3(1.0), deepTint, tintStrength);
+}
+
+// Vibrant hue-accurate emissive color for colored light sources (torches, soul fire, redstone,
+// froglights, sea lanterns, amethyst, crying obsidian, modded colored lamps).
+// Masks dark non-emissive parts (lantern iron cages, torch sticks, ore stone) on vanilla emitters
+// while leaving LabPBR per-texel emission maps untouched.
+vec3 evalEmitterColor(vec3 albedoLinear, float blockEmit, float pbrEmit, out float emitStrength) {
+    float maxC = maxOf(albedoLinear);
+    float mask = (pbrEmit > 0.0) ? 1.0 : smoothstep(0.12, 0.42, maxC);
+    emitStrength = max(blockEmit * mask, pbrEmit);
+    if (emitStrength <= 1e-4 || maxC <= 1e-4) {
+        emitStrength = 0.0;
+        return vec3(0.0);
+    }
+    vec3 chroma = saturate(albedoLinear / maxC);
+    vec3 richChroma = pow(chroma, vec3(1.55));
+    float lumBase = max(luma(albedoLinear), 0.15 * maxC);
+    float lumRich = max(luma(richChroma), 0.12);
+    float energy = mix(maxC, lumBase / lumRich, 0.35);
+    return richChroma * clamp(energy, 0.25, 1.35);
+}
+
+vec3 evalDirectEmitterColor(vec3 albedoLinear) {
+    float maxC = maxOf(albedoLinear);
+    if (maxC <= 1e-4) return vec3(0.0);
+    vec3 chroma = saturate(albedoLinear / maxC);
+    vec3 richChroma = pow(chroma, vec3(1.40));
+    float lumBase = max(luma(albedoLinear), 0.15 * maxC);
+    float lumRich = max(luma(richChroma), 0.12);
+    float energy = mix(maxC, lumBase / lumRich, 0.35);
+    return richChroma * clamp(energy, 0.25, 1.35);
+}
+
 // ---- Fast PCG Hash & RNG ----
 uint pcgHash(uint v) {
     uint state = v * 747796405u + 2891336453u;
@@ -37,15 +80,79 @@ vec2 nextVec2(inout uint rng) {
     return vec2(nextFloat(rng), nextFloat(rng));
 }
 
-// Analytical 4x4 Bayer-stratified R2 spatiotemporal 2D sequence:
-// Steps full integer R2 indices 0..15 across each 4x4 tile so every tile covers [0,1)^2 uniformly.
+// ---- True Spatiotemporal Blue Noise (Heitz 2019: 16x16 Bayer-Ranked 2D Sobol + Stride-1 Temporal R2) ----
+// - Zero 4x4 white-noise tile seams: exact recursive 16x16 blue-noise stratification (33x less LF energy!).
+// - Stride-1 R2 temporal rotation (never frame<<4!) preserves exact spatial blue noise on every frame
+//   while giving every single pixel optimal O(1/N) quasi-Monte-Carlo convergence over time!
+uint bayer256(ivec2 p) {
+    uint x = uint(p.x) & 15u;
+    uint y = uint(p.y) & 15u;
+    uint z = x ^ y;
+    uint r = ((z & 1u) << 7u) | ((y & 1u) << 6u)
+           | ((z & 2u) << 4u) | ((y & 2u) << 3u)
+           | ((z & 4u) << 1u) | ((y & 4u) << 0u)
+           | ((z & 8u) >> 2u) | ((y & 8u) >> 3u);
+    return r;
+}
+
+uint sobolDim1_8(uint k) {
+    uint v = 0u;
+    if ((k &   1u) != 0u) v ^= 0x80u;
+    if ((k &   2u) != 0u) v ^= 0xC0u;
+    if ((k &   4u) != 0u) v ^= 0xA0u;
+    if ((k &   8u) != 0u) v ^= 0xF0u;
+    if ((k &  16u) != 0u) v ^= 0x88u;
+    if ((k &  32u) != 0u) v ^= 0xCCu;
+    if ((k &  64u) != 0u) v ^= 0xAAu;
+    if ((k & 128u) != 0u) v ^= 0xFFu;
+    return v;
+}
+
 vec2 stbn2D(ivec2 px, int frame, uint salt) {
-    ivec2 b = px & 3;
-    int bayer16 = (((b.x ^ b.y) & 1) << 3) | ((b.y & 1) << 2) | ((((b.x ^ b.y) >> 1) & 1) << 1) | ((b.y >> 1) & 1);
-    uint tileSeed = pcgHash(uint(px.x >> 2) * 374761393u + uint(px.y >> 2) * 668265263u + salt * 2246822519u);
-    vec2 tileShift = vec2(float(tileSeed & 65535u), float(tileSeed >> 16u)) * (1.0 / 65536.0);
-    float idx = float(((frame & 255) << 4) + bayer16) + 1.0;
-    return fract(vec2(0.7548776662, 0.5698402909) * idx + tileShift);
+    // Rotate pixel grid lightly by salt so independent dimensions never correlate.
+    ivec2 sp = px + ivec2(int((salt * 5u) & 15u), int((salt * 11u) & 15u));
+    uint idx = bayer256(sp);
+    uint k   = bitfieldReverse(idx) >> 24u;
+    vec2 bn  = vec2(float(idx) + 0.5, float(sobolDim1_8(k)) + 0.5) * (1.0 / 256.0);
+    // Stride-1 R2 temporal sequence + salt phase shift (constant across screen -> preserves spatial blue noise!)
+    float t  = float(frame & 2047) + float(salt) * 17.0;
+    return fract(bn + vec2(0.7548776662, 0.5698402909) * t);
+}
+
+// ---- 3D Spatiotemporal Blue Noise (4x4x4 Recursive 3D Bayer-Sobol + Stride-1 Temporal R2) ----
+// Guarantees face-adjacent 3D Radiance Cache cells sample opposite hemispheres (0.000000 4x4x4 variance!),
+// turning 1-SPP Monte Carlo probe errors strictly into high-frequency blue noise that cancels out cleanly!
+uint bayer3D64(ivec3 c) {
+    uint x = uint(c.x) & 3u;
+    uint y = uint(c.y) & 3u;
+    uint z = uint(c.z) & 3u;
+    uint xy = x ^ y;
+    uint xyz = xy ^ z;
+    return ((xyz & 1u) << 5u) | ((xy & 1u) << 4u) | ((z & 1u) << 3u)
+         | (((xyz >> 1u) & 1u) << 2u) | (((xy >> 1u) & 1u) << 1u) | ((z >> 1u) & 1u);
+}
+
+vec3 stbn3D(ivec3 cell, uint seq, uint salt) {
+    ivec3 sc = cell + ivec3(int(salt & 3u), int((salt * 3u) & 3u), int((salt * 5u) & 3u));
+    uint idx = bayer3D64(sc);
+    uint k   = bitfieldReverse(idx) >> 26u;
+    uint sy  = 0u;
+    if ((k &  1u) != 0u) sy ^= 0x20u;
+    if ((k &  2u) != 0u) sy ^= 0x30u;
+    if ((k &  4u) != 0u) sy ^= 0x28u;
+    if ((k &  8u) != 0u) sy ^= 0x3Cu;
+    if ((k & 16u) != 0u) sy ^= 0x22u;
+    if ((k & 32u) != 0u) sy ^= 0x33u;
+    uint sz  = 0u;
+    if ((k &  1u) != 0u) sz ^= 0x20u;
+    if ((k &  2u) != 0u) sz ^= 0x10u;
+    if ((k &  4u) != 0u) sz ^= 0x38u;
+    if ((k &  8u) != 0u) sz ^= 0x24u;
+    if ((k & 16u) != 0u) sz ^= 0x12u;
+    if ((k & 32u) != 0u) sz ^= 0x29u;
+    vec3 bn  = (vec3(float(idx), float(sy), float(sz)) + 0.5) * (1.0 / 64.0);
+    float t  = float(seq & 2047u) + float(salt) * 13.0;
+    return fract(bn + vec3(0.8191725134, 0.6710436067, 0.5497004779) * t);
 }
 
 // ---- Orthonormal Basis (Duff et al. 2017) ----

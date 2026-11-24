@@ -26,6 +26,7 @@ void main() {
     }
     if (slot == 0u) {
         primPool.primCount = 0u;
+        lightList.lightCount = 0u;
         rcWork.count[0] = 0u;
         rcWork.count[1] = 0u;
     }

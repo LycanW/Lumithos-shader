@@ -27,7 +27,7 @@ void main() {
     vec3 albedo = srgbToLinear(tex.rgb);
     vec3 lightDir = getShadowLightDir();
     float NdotL = max(dot(N, lightDir), 0.0);
-    float shadowVis = (NdotL > 0.0) ? sampleShadowFast(vWorldPos, N) : 0.0;
+    vec3 shadowVis = (NdotL > 0.0) ? sampleShadowFast(vWorldPos, N) : vec3(0.0);
 
     vec3 direct = albedo * INV_PI * getDirectLightColor() * (NdotL * shadowVis);
     vec3 ambient = albedo * evalSky(N, false) * (0.25 + 0.75 * vSkyLight);

@@ -35,42 +35,50 @@ void main() {
     bool allowAlloc = !mat.isHand
                    && (((px.x ^ frameCounter) & 3) == 0)
                    && (((px.y ^ (frameCounter >> 2)) & 3) == 0);
-    bool useGuide = !mat.isHand && queryRCPathGuide(worldPos, mat.geoNormal, allowAlloc, nextVec2(rng), guideDir, guideKappa, guideProb);
+    bool useGuide = !mat.isHand && queryRCPathGuide(worldPos, mat.geoNormal, allowAlloc, stbn2D(px, frameCounter, 3u), guideDir, guideKappa, guideProb);
 
     vec2 uDir = stbn2D(px, frameCounter, 0u);
     vec3 rayDir;
-    if (useGuide && nextFloat(rng) < guideProb) {
+    if (useGuide && stbn2D(px, frameCounter, 4u).x < guideProb) {
         rayDir = sampleVMF(guideDir, guideKappa, uDir);
     } else {
         rayDir = sampleCosineHemisphere(mat.shadeNormal, uDir);
     }
 
-    // Unbiased hemisphere rejection: samples landing below the geometric or shading
-    // hemisphere contribute 0.0 (never resampled, preserving exact 1.0 Monte Carlo energy!).
+    // Unbiased hemisphere rejection on indirect bounce only (NEE direct lights always evaluate!).
     float cosN = dot(rayDir, mat.shadeNormal);
-    if (dot(rayDir, mat.geoNormal) <= 1e-4 || cosN <= 1e-4) {
-        imageStore(colorimg3, px, vec4(0.0, 0.0, 0.0, 64.0));
-        return;
-    }
+    bool validIndirect = (dot(rayDir, mat.geoNormal) > 1e-4 && cosN > 1e-4);
 
-    float pdfCos = cosN * INV_PI;
+    float pdfCos = max(cosN, 0.0) * INV_PI;
     float pdfMix = useGuide ? mix(pdfCos, pdfVMF(rayDir, guideDir, guideKappa), guideProb) : pdfCos;
-    // Exact diffuse irradiance weight (cosN / PI) / pdfMix, bounded <= ~3.6.
-    float weight = pdfCos / max(pdfMix, 1e-5);
+    // Exact diffuse irradiance weight (cosN / PI) / pdfMix, bounded <= ~3.0.
+    float weight = validIndirect ? (pdfCos / max(pdfMix, 1e-5)) : 0.0;
+
+    float camDist = length(worldPos);
+    vec3 toCam = -worldPos / max(camDist, 1e-4);
+    vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, mat.geoNormal, toCam, camDist);
+
+    bool useNEE = (lightList.lightCount > 0u && lightList.lightCount <= MAX_SCENE_LIGHTS);
+
+    // Direct 1-SPP RIS Next-Event Estimation from Emissive Voxel LightList (8 candidates -> fast L2 loop!).
+    vec3 neeDir = vec3(0.0, 1.0, 0.0);
+    vec3 neeRad = useNEE ? sampleDirectLightsNEE(rayOrig, mat.shadeNormal, false, 8, stbn2D(px, frameCounter, 8u), neeDir) : vec3(0.0);
+    if (any(isnan(neeRad)) || any(isinf(neeRad))) neeRad = vec3(0.0);
 
     vec3 radiance = vec3(0.0);
     float hitDist = 64.0;
     bool ssrtHit = false;
 
     #ifdef DIFFUSE_SSRT
-        if (!mat.isHand && frameCounter > 1) {
+        if (validIndirect && !mat.isHand && frameCounter > 1) {
             vec2 prevHitUV;
             float ssDist;
             if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * mat.geoNormal) * 0.04, rayDir, 8, 0.18, nextFloat(rng), 0.25, prevHitUV, ssDist)) {
                 ivec2 hpx = clamp(ivec2(prevHitUV * screenSize()), ivec2(0), res - 1);
-                vec3 prevLit = texelFetch(colortex5, hpx, 0).rgb;
-                if (!any(isnan(prevLit)) && !any(isinf(prevLit))) {
-                    radiance = min(max(prevLit, vec3(0.0)), vec3(16.0));
+                vec4 prevTap = texelFetch(colortex5, hpx, 0);
+                // Keep DIFFUSE_SSRT active on 99.9% of surfaces; only skip emissive pixels when NEE is active!
+                if ((!useNEE || prevTap.a < 0.01) && !any(isnan(prevTap.rgb)) && !any(isinf(prevTap.rgb))) {
+                    radiance = min(max(prevTap.rgb, vec3(0.0)), vec3(16.0));
                     hitDist = ssDist;
                     ssrtHit = true;
                 }
@@ -78,35 +86,33 @@ void main() {
         }
     #endif
 
-    if (!ssrtHit) {
-        float camDist = length(worldPos);
-        vec3 toCam = -worldPos / max(camDist, 1e-4);
-        // Pull ray origin slightly toward camera + normal so concave 90-degree corners
-        // never poke into the perpendicular wall voxel and leak outdoor daylight.
-        vec3 rayOrig = worldPos + mat.geoNormal * (0.018 + 0.001 * camDist) + toCam * (0.012 + 0.0005 * camDist);
-        TraceHit hit = traceScene(rayOrig, rayDir, DIFFUSE_MAX_STEPS, 1.0);
+    if (validIndirect && !ssrtHit) {
+        TraceHit hit = traceScene(rayOrig, rayDir, DIFFUSE_MAX_STEPS, 1.0, true);
         if (hit.hit) {
             hitDist = hit.dist;
-            radiance += hit.albedo * (hit.emission * EMISSIVE_GI_SCALE * hit.emitFluxScale);
+            if (!useNEE || !hit.isBlockEmit) {
+                radiance += hit.emitColor * (hit.emission * EMISSIVE_GI_SCALE * hit.emitFluxScale);
+            }
 
             vec3 lightDir = getShadowLightDir();
             float NdotL = max(dot(hit.normal, lightDir), 0.0);
             if (NdotL > 0.0) {
-                float vis = sampleShadowFastRay(hit.worldPos, hit.normal, rayDir);
+                vec3 vis = sampleShadowFastRay(hit.worldPos, hit.normal, rayDir);
                 radiance += hit.albedo * INV_PI * getDirectLightColor() * (NdotL * vis);
             }
 
-            vec3 bounce = queryRadianceCacheStochastic(hit.worldPos, hit.normal, 0u, nextVec2(rng));
+            vec3 bounce = queryRadianceCacheStochastic(hit.worldPos, hit.normal, 0u, stbn2D(px, frameCounter, 5u));
             radiance += hit.albedo * bounce * 0.85;
+            radiance *= hit.throughput;
         } else if (hit.exitedGrid) {
-            radiance = evalSky(rayDir, false);
+            radiance = evalSky(rayDir, false) * hit.throughput;
         } else {
             // Ray ran out of steps while still inside an indoor volume: query cache instead of fake sky!
-            radiance = queryRadianceCache(hit.worldPos, -rayDir, 0u, false);
+            radiance = queryRadianceCache(hit.worldPos, -rayDir, 0u, false) * hit.throughput;
         }
     }
 
-    radiance = min(max(radiance * min(weight, 3.0), vec3(0.0)), vec3(64.0));
+    radiance = min(max(radiance * min(weight, 3.0) + neeRad, vec3(0.0)), vec3(28.0));
     if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
 
     imageStore(colorimg3, px, vec4(radiance, hitDist));

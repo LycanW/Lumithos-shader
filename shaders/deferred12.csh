@@ -45,19 +45,23 @@ void main() {
     vec3 raw = max(rawTap.rgb, vec3(0.0));
     if (any(isnan(raw)) || any(isinf(raw))) raw = vec3(0.0);
 
-    // Pure deterministic mirrors (perceptual roughness < 0.08) have zero GGX sampling noise:
-    // bypass temporal accumulation completely to guarantee zero ghosting & zero motion blur,
-    // and preserve hitDist in .a so TAA can reproject at the exact virtual reflection parallax!
-    if (mat.roughness < 0.08) {
+    // Pure FLAT deterministic mirrors (roughness < 0.08 & no normal-map bump) have zero sampling or
+    // normal-map TAA-jitter noise: bypass temporal accumulation completely for zero ghosting,
+    // and preserve hitDist in .a so TAA can reproject at exact planar virtual parallax!
+    // Bumpy normal-mapped glossy surfaces run gentle temporal stabilization so normal-map facets don't sparkle.
+    bool isFlatMirror = (mat.roughness < 0.08) && (dot(mat.shadeNormal, mat.geoNormal) > 0.998);
+    if (isFlatMirror) {
         imageStore(specHistImg, px + currOff, roundHalf(vec4(raw, 1.0)));
         imageStore(specMomImg,  px + currOff, vec4(luma(raw), luma(raw) * luma(raw), 0.0, 0.0));
         imageStore(scratchImg,  px,           roundHalf(vec4(raw, rawTap.a)));
         return;
     }
 
-    vec3 curr = mat.roughness > 0.20
-        ? despike3x3(colortex4, px, res, raw, mat.geoNormal, mat.shadeNormal, depth, 3.5, 0.04)
-        : raw;
+    // Roughness-scaled 3x3 firefly despike for ALL stochastic GGX surfaces (0.08..0.50):
+    // Prevents isolated 1-SPP lantern hits on polished glossy walls/floors from spawning glowing blotches!
+    float roughT = smoothstep(0.08, 0.35, mat.roughness);
+    vec3 curr = despike3x3(colortex4, px, res, raw, mat.geoNormal, mat.shadeNormal, depth,
+                           mix(5.5, 2.8, roughT), mix(0.22, 0.04, roughT));
     float currLuma = luma(curr);
 
     // Virtual reflection depth reprojection for smooth mirrors, surface reprojection for rough.
@@ -68,10 +72,12 @@ void main() {
     vec2 oldMom  = vec2(0.0);
     float oldAge = 0.0;
     float support = 0.0;
+    float speedPx = 0.0;
 
     if (frameCounter > 1) {
         vec2 prevUV = reprojectScreenUV(uv, reprojPos);
         if (all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThan(prevUV, vec2(1.0)))) {
+            speedPx = length((prevUV - uv) * vec2(res));
             vec2 pCoord = prevUV * vec2(res) - 0.5;
             ivec2 base = ivec2(floor(pCoord));
             vec2 f = pCoord - vec2(base);
@@ -106,29 +112,46 @@ void main() {
         oldAge  /= support;
         oldMom  /= support;
 
-        // 3x3 neighborhood clamp on glossy specular history prevents ghosting trails during motion.
-        vec3 nMin = curr;
-        vec3 nMax = curr;
-        for (int y = -1; y <= 1; ++y) {
-            for (int x = -1; x <= 1; ++x) {
-                if (x == 0 && y == 0) continue;
-                ivec2 q = clamp(px + ivec2(x, y), ivec2(0), res - 1);
-                vec3 s = max(texelFetch(colortex4, q, 0).rgb, vec3(0.0));
-                nMin = min(nMin, s);
-                nMax = max(nMax, s);
+        // Motion-gated 3x3 neighborhood clamp:
+        // Only clamp converged glossy history during actual camera/reflection motion so stationary
+        // 1-SPP glossy reflections converge rock-solid without flickering or popping bright spots!
+        float motionClampW = smoothstep(0.20, 1.75, speedPx);
+        if (motionClampW > 0.01) {
+            vec3 nMin = curr;
+            vec3 nMax = curr;
+            for (int y = -1; y <= 1; ++y) {
+                for (int x = -1; x <= 1; ++x) {
+                    if (x == 0 && y == 0) continue;
+                    ivec2 q = clamp(px + ivec2(x, y), ivec2(0), res - 1);
+                    vec3 s = max(texelFetch(colortex4, q, 0).rgb, vec3(0.0));
+                    nMin = min(nMin, s);
+                    nMax = max(nMax, s);
+                }
             }
+            vec3 margin = max((nMax - nMin) * 0.5, vec3(0.05));
+            vec3 clampedHist = clamp(oldSlow, max(nMin - margin, vec3(0.0)), nMax + margin);
+            oldSlow = mix(oldSlow, clampedHist, motionClampW);
         }
-        vec3 margin = max((nMax - nMin) * 0.5, vec3(0.05));
-        oldSlow = clamp(oldSlow, max(nMin - margin, vec3(0.0)), nMax + margin);
     }
 
     float moveDecay = exp(-length(cameraVelocity) * (mat.roughness < 0.20 ? 5.0 : 2.0));
     oldAge *= moveDecay;
 
-    float age = min(SPECULAR_MAX_HISTORY, oldAge + 1.0);
+    // Soft temporal firefly guard on settled glossy pixels suppresses stray 1-SPP lantern spikes.
+    vec3 safeCurr = curr;
+    if (support > 1e-4 && oldAge >= 8.0 && speedPx < 0.75) {
+        float maxSpecLuma = max(luma(oldSlow) * 6.0 + 0.6, 1.5);
+        if (currLuma > maxSpecLuma) {
+            safeCurr *= maxSpecLuma / max(currLuma, 1e-6);
+        }
+    }
+
+    float maxHist = (mat.roughness < 0.08) ? 10.0 : SPECULAR_MAX_HISTORY;
+    float age = min(maxHist, oldAge + 1.0);
     float alpha = 1.0 / max(age, 1.0);
-    vec2 moments = mix(oldMom, vec2(currLuma, currLuma * currLuma), alpha);
-    vec3 integrated = mix(oldSlow, curr, alpha);
+    float safeLuma = luma(safeCurr);
+    vec2 moments = mix(oldMom, vec2(safeLuma, safeLuma * safeLuma), alpha);
+    vec3 integrated = mix(oldSlow, safeCurr, alpha);
     float stdDev = sqrt(max(moments.y - moments.x * moments.x, 0.0));
 
     imageStore(specHistImg, px + currOff, roundHalf(vec4(integrated, age)));

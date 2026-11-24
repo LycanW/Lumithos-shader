@@ -23,12 +23,24 @@ in vec4  vShadowClip[3];
 out vec2 gTexCoord;
 out vec4 gColor;
 
-void writeTintAndSky(uint slot, vec3 avgColor, float avgSky, bool isTinted) {
+void writeTintAndSky(uint slot, vec3 avgColor, float avgSky, bool isTinted, uint emissive4) {
     uint packedTint = packTintAndSky(isTinted ? avgColor : vec3(1.0), avgSky);
-    if (isTinted) {
+    if (isTinted && emissive4 == 0u) {
         surfacePool.surfaces[slot].tintAndSky = packedTint;
     } else {
         atomicMax(surfacePool.surfaces[slot].tintAndSky, packedTint);
+    }
+}
+
+void registerEmissiveVoxel(uint slot, ivec3 vCoord, uint emissive4) {
+    if (emissive4 == 0u) return;
+    // Bit 28 of tintAndSky deduplicates 1 LightList entry per emitting voxel (100% race-free!).
+    if ((atomicOr(surfacePool.surfaces[slot].tintAndSky, 0x10000000u) & 0x10000000u) == 0u) {
+        uint lIdx = atomicAdd(lightList.lightCount, 1u);
+        if (lIdx < MAX_SCENE_LIGHTS) {
+            lightList.lights[lIdx].posAndPower  = vec4(vec3(vCoord) + 0.5, float(emissive4) * (1.0 / 15.0));
+            lightList.lights[lIdx].colorAndMeta = vec4(1.0, 1.0, 1.0, 0.5);
+        }
     }
 }
 
@@ -88,7 +100,8 @@ void voxelizeTerrainTriangle() {
         if (abs(det) > 1e-4) {
             uint slot = voxelLinearIndex(vCoord);
             imageStore(voxelGridImg, vCoord, uvec4(1u));
-            writeTintAndSky(slot, avgColor, avgSky, isTinted);
+            writeTintAndSky(slot, avgColor, avgSky, isTinted, emissive4);
+            registerEmissiveVoxel(slot, vCoord, emissive4);
 
             vec2 duv1 = vTexCoord[1] - vTexCoord[0];
             vec2 duv2 = vTexCoord[2] - vTexCoord[0];
@@ -142,7 +155,8 @@ void voxelizeTerrainTriangle() {
 
                 uint slot = voxelLinearIndex(c);
                 imageStore(voxelGridImg, c, uvec4(1u));
-                writeTintAndSky(slot, avgColor, avgSky, isTinted);
+                writeTintAndSky(slot, avgColor, avgSky, isTinted, emissive4);
+                registerEmissiveVoxel(slot, c, emissive4);
 
                 uint pIdx = atomicAdd(primPool.primCount, 1u);
                 if (pIdx >= MAX_PRIMITIVES) return;

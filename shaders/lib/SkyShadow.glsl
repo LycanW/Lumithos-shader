@@ -71,35 +71,48 @@ float shadowScreenZPerBlock() {
     return 0.25 * abs(shadowProjection[2][2]);
 }
 
-// Fast 1-tap shadow lookup for secondary bounces, reflections & Radiance Cache probes.
-// Uses exact distortion-aware normal offset (1.2x local texel) + minimal 0.015-block Z epsilon
-// so shadows stay tightly locked to block bases and never punch through 1-block indoor corners.
-float sampleShadowFastRay(vec3 worldPos, vec3 normal, vec3 inRayDir) {
+// Evaluate single shadow tap with opaque (shadowtex1) + colored translucent (shadowtex0 + shadowcolor0).
+vec3 evalShadowTapColored(vec2 uv, float zRef) {
+    float dOpaque = textureLod(shadowtex1, uv, 0.0).r;
+    if (zRef > dOpaque) return vec3(0.0);
+
+    float dAll = textureLod(shadowtex0, uv, 0.0).r;
+    if (zRef > dAll) {
+        vec4 sc = textureLod(shadowcolor0, uv, 0.0);
+        return evalGlassTransmittance(sc.rgb, sc.a);
+    }
+    return vec3(1.0);
+}
+
+// Fast 1-tap colored shadow lookup for secondary bounces, reflections & Radiance Cache probes.
+// Uses exact distortion-aware normal offset (1.25x local texel) + minimal 0.015-block Z epsilon
+// so shadows stay tightly locked to block bases and stained glass casts colored sunlight cleanly.
+vec3 sampleShadowFastRay(vec3 worldPos, vec3 normal, vec3 inRayDir) {
     vec3 lightDir = getShadowLightDir();
     float NdotL = dot(normal, lightDir);
-    if (NdotL <= 0.0) return 0.0;
+    if (NdotL <= 0.0) return vec3(0.0);
 
     float texelWorld = shadowTexelWorldSize(worldPos);
     float normalOffset = clamp(texelWorld * 1.25, 0.014, 0.25);
     vec3 biasedPos = worldPos + normal * normalOffset - inRayDir * 0.008;
     vec3 sp = worldToShadowScreen(biasedPos);
-    if (any(lessThan(sp, vec3(0.0))) || any(greaterThan(sp, vec3(1.0)))) return 1.0;
+    if (any(lessThan(sp, vec3(0.0))) || any(greaterThan(sp, vec3(1.0)))) return vec3(1.0);
 
     float bias = max(0.015 * shadowScreenZPerBlock(), 2.0e-5);
-    return step(sp.z - bias, textureLod(shadowtex0, sp.xy, 0.0).r);
+    return evalShadowTapColored(sp.xy, sp.z - bias);
 }
 
-float sampleShadowFast(vec3 worldPos, vec3 normal) {
+vec3 sampleShadowFast(vec3 worldPos, vec3 normal) {
     return sampleShadowFastRay(worldPos, normal, vec3(0.0));
 }
 
-// Soft 4-tap jittered PCF shadow for primary direct lighting.
-// Normal offset scales with exact distorted shadow texel size (eliminates acne at all angles
-// without needing large sunward Z-bias, preventing both peter-panning and indoor corner leaks).
-float sampleShadowPCF(vec3 worldPos, vec3 normal, inout uint rng) {
+// Soft 4-tap jittered PCF colored shadow for primary direct lighting.
+// Uses spatiotemporal blue-noise rotation (Heitz 2019) so soft shadow penumbra errors stay
+// strictly high-frequency for TAA/denoising without low-frequency blotches.
+vec3 sampleShadowPCF(vec3 worldPos, vec3 normal, float blueNoise01) {
     vec3 lightDir = getShadowLightDir();
     float NdotL = dot(normal, lightDir);
-    if (NdotL <= 0.0) return 0.0;
+    if (NdotL <= 0.0) return vec3(0.0);
 
     float dist = length(worldPos);
     vec3 toCam = -worldPos / max(dist, 1e-4);
@@ -107,21 +120,21 @@ float sampleShadowPCF(vec3 worldPos, vec3 normal, inout uint rng) {
     float normalOffset = clamp(texelWorld * 1.65, 0.018, 0.30);
     vec3 biasedPos = worldPos + normal * normalOffset + toCam * 0.008;
     vec3 sp = worldToShadowScreen(biasedPos);
-    if (any(lessThan(sp, vec3(0.0))) || any(greaterThan(sp, vec3(1.0)))) return 1.0;
+    if (any(lessThan(sp, vec3(0.0))) || any(greaterThan(sp, vec3(1.0)))) return vec3(1.0);
 
     float bias = max(0.015 * shadowScreenZPerBlock(), 2.0e-5);
     float invRes = 1.0 / float(shadowMapResolution);
-    float angle = TWO_PI * nextFloat(rng);
+    float angle = TWO_PI * blueNoise01;
     mat2 rot = mat2(cos(angle), sin(angle), -sin(angle), cos(angle));
 
     const vec2 offsets[4] = vec2[4](
         vec2(-0.7, -0.3), vec2(0.7, 0.3),
         vec2(-0.3,  0.7), vec2(0.3, -0.7)
     );
-    float sum = 0.0;
+    vec3 sum = vec3(0.0);
     for (int i = 0; i < 4; ++i) {
         vec2 uv = sp.xy + (rot * offsets[i]) * (0.75 * invRes);
-        sum += step(sp.z - bias, textureLod(shadowtex0, uv, 0.0).r);
+        sum += evalShadowTapColored(uv, sp.z - bias);
     }
     return sum * 0.25;
 }

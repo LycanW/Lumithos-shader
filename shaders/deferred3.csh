@@ -28,11 +28,15 @@ void main() {
     uint g1 = texelFetch(colortex2, px, 0).r;
     vec3 centerGeoN = unpackNormal16(g1 & 65535u);
 
-    // Geometry-aware 3x3 (stride 2) spatial moment estimation captures residual blotch variance.
+    // Leave-One-Out geometry-aware 3x3 (stride 2) spatial moment estimation:
+    // Excluding center (0,0) lets RCRS cleanly catch isolated firefly spikes BEFORE the
+    // +-48px 1D spatial filter can smear them into glowing light blotches, while keeping
+    // smooth real light gradients completely untouched!
     vec2 moments = vec2(0.0);
     float wSum = 0.0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
+            if (x == 0 && y == 0) continue;
             ivec2 q = clamp(px + ivec2(x, y) * 2, ivec2(0), res - 1);
             float qd = texelFetch(depthtex1, q, 0).r;
             if (qd >= 0.999999) continue;
@@ -45,18 +49,24 @@ void main() {
             wSum += 1.0;
         }
     }
-    moments /= max(wSum, 1.0);
+    float cLuma = luma(rad);
+    if (wSum > 0.5) {
+        moments /= wSum;
+    } else {
+        moments = vec2(cLuma, cLuma * cLuma);
+    }
 
     float sigma = sqrt(max(moments.y - moments.x * moments.x, 0.0));
     // Boost spatial filter width on newly disoccluded / low-history pixels.
     sigma += (moments.x + 0.025) / max(exp2(min(age * 0.45, 10.0)) - 1.0, 0.25);
 
-    // Gentle RCRS variance clamp removes isolated bright/dark outliers before large-radius filtering.
-    float cLuma = luma(rad);
-    float margin = max(2.5 * sigma, 0.015);
-    float clampedLuma = clamp(cLuma, max(moments.x - margin, 0.0), moments.x + margin);
-    if (cLuma > 1e-5) {
-        rad *= clampedLuma / cLuma;
+    // Leave-One-Out RCRS variance clamp removes isolated firefly outliers before large-radius filtering.
+    if (wSum >= 3.0) {
+        float margin = max(2.25 * sigma, 0.02 + 0.15 * moments.x);
+        float clampedLuma = clamp(cLuma, max(moments.x - margin, 0.0), moments.x + margin);
+        if (cLuma > 1e-5) {
+            rad *= clampedLuma / cLuma;
+        }
     }
 
     // Perceptual compression before spatial filtering (inverted at end of pass 7).

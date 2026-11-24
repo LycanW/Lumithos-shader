@@ -1,6 +1,7 @@
 #version 430 compatibility
 
 // Pass: Specular Reflection (1 SPP GGX VNDF + 16-step SSR + Hybrid 6-Face/Non-Cube Raytrace)
+#define TRACE_HIGH_PRIM_GUARD
 #include "/lib/Raytrace.glsl"
 #include "/lib/SkyShadow.glsl"
 #include "/lib/ScreenTrace.glsl"
@@ -70,7 +71,7 @@ void main() {
                 ivec2 hpx = clamp(ivec2(prevHitUV * screenSize()), ivec2(0), res - 1);
                 vec3 prevLit = texelFetch(colortex5, hpx, 0).rgb;
                 if (!any(isnan(prevLit)) && !any(isinf(prevLit))) {
-                    radiance = min(max(prevLit, vec3(0.0)), vec3(32.0));
+                    radiance = min(max(prevLit, vec3(0.0)), vec3(12.0));
                     hitDist = ssDist;
                     ssrHit = true;
                 }
@@ -80,35 +81,37 @@ void main() {
 
     if (!ssrHit) {
         float camDist = length(worldPos);
-        vec3 rayOrig = worldPos + mat.geoNormal * (0.018 + 0.001 * camDist) + viewDir * (0.012 + 0.0005 * camDist);
+        vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, mat.geoNormal, viewDir, camDist);
         // Full-res atlas LOD 0 for razor-sharp mirror reflections of 6-face & rotated block textures!
         float specLod = mat.roughness < 0.25 ? 0.0 : 1.0;
         int maxSpecSteps = mat.roughness < 0.22 ? SPECULAR_MAX_STEPS : 64;
-        TraceHit hit = traceScene(rayOrig, rayDir, maxSpecSteps, specLod);
+        TraceHit hit = traceScene(rayOrig, rayDir, maxSpecSteps, specLod, true);
         if (hit.hit) {
             hitDist = hit.dist;
-            radiance += hit.albedo * (hit.emission * EMISSIVE_SCALE);
+            radiance += hit.emitColor * (hit.emission * EMISSIVE_SCALE);
 
             vec3 lightDir = getShadowLightDir();
             float NdotL = max(dot(hit.normal, lightDir), 0.0);
             if (NdotL > 0.0) {
-                float vis = sampleShadowFastRay(hit.worldPos, hit.normal, rayDir);
+                vec3 vis = sampleShadowFastRay(hit.worldPos, hit.normal, rayDir);
                 radiance += hit.albedo * INV_PI * getDirectLightColor() * (NdotL * vis);
             }
 
             vec3 skyAmb = evalSky(hit.normal, false) * (0.15 + 0.85 * hit.skyLight);
             vec3 bounce = (mat.roughness < 0.25)
-                ? queryRadianceCacheSmooth(hit.worldPos, hit.normal, skyAmb, 0u, nextVec2(rng))
-                : queryRadianceCacheStochastic(hit.worldPos, hit.normal, 0u, nextVec2(rng));
+                ? queryRadianceCacheSmooth(hit.worldPos, hit.normal, skyAmb, 0u, stbn2D(px, frameCounter, 6u))
+                : queryRadianceCacheStochastic(hit.worldPos, hit.normal, 0u, stbn2D(px, frameCounter, 6u));
             radiance += hit.albedo * bounce * 0.85;
+            radiance *= hit.throughput;
         } else if (hit.exitedGrid) {
-            radiance = evalSky(rayDir, true);
+            radiance = evalSky(rayDir, true) * hit.throughput;
         } else {
-            radiance = queryRadianceCache(hit.worldPos, -rayDir, 0u, false);
+            radiance = queryRadianceCache(hit.worldPos, -rayDir, 0u, false) * hit.throughput;
         }
     }
 
-    radiance = max(radiance, vec3(0.0));
+    float specClamp = (mat.roughness < 0.12) ? 32.0 : 12.0;
+    radiance = min(max(radiance, vec3(0.0)), vec3(specClamp));
     if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
 
     imageStore(colorimg4, px, vec4(radiance, hitDist));

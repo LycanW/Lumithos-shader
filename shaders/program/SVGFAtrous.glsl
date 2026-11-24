@@ -87,8 +87,8 @@ void main() {
     float sumVar = center.a * center.a;
     float sumW = 1.0;
 
-    // Pure mirrors pass through untouched (preserving hitDist in .a for virtual-depth TAA).
-    if (isSpec && mat.roughness < 0.08) {
+    // Pure flat mirrors pass through untouched (preserving hitDist in .a for virtual-depth TAA).
+    if (isSpec && mat.roughness < 0.08 && dot(mat.shadeNormal, mat.geoNormal) > 0.998) {
         #ifdef ATROUS_WRITE_COLORTEX4
             imageStore(colorimg4, px, roundHalf(center));
         #else

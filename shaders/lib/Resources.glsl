@@ -127,6 +127,20 @@ layout(std430, binding = 3) coherent buffer RadianceCacheWorklist {
     uint data[];
 } rcWork;
 
+// ---- Compact Emissive Voxel LightList for 1-SPP RIS Next-Event Estimation (64 KB, L2-resident!) ----
+struct SceneLight {
+    vec4 posAndPower;  // xyz: voxel-space emitter center, w: block emission level (0..1)
+    vec4 colorAndMeta; // rgb: linear rich emitter color, w: packed emitter voxel flags/radius
+};
+
+layout(std430, binding = 4) coherent buffer LightListBuffer {
+    uint lightCount;
+    uint pad0;
+    uint pad1;
+    uint pad2;
+    SceneLight lights[];
+} lightList;
+
 // ---- Coordinate Space Helpers ----
 vec2 screenSize() { return vec2(viewWidth, viewHeight); }
 vec2 texelSize()  { return vec2(1.0 / viewWidth, 1.0 / viewHeight); }

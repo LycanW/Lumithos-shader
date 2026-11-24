@@ -44,17 +44,17 @@ void main() {
         -viewPos.z
     ));
 
-    // Direct Sunlight / Moonlight (4-tap jittered PCF on Shadow Map)
+    // Direct Sunlight / Moonlight (4-tap blue-noise-rotated colored PCF on Shadow Map)
     vec3 lightDir = getShadowLightDir();
     float NdotL = max(dot(mat.shadeNormal, lightDir), 0.0);
-    float shadowVis = (NdotL > 0.0) ? sampleShadowPCF(worldPos, mat.geoNormal, rng) : 0.0;
+    vec3 shadowVis = (NdotL > 0.0) ? sampleShadowPCF(worldPos, mat.geoNormal, stbn2D(px, frameCounter, 7u).x) : vec3(0.0);
     vec3 directDiffuse = mat.albedo * INV_PI * getDirectLightColor() * (NdotL * shadowVis);
 
     // Direct Specular Highlight (GGX with LabPBR RGB F0 & physical NDF cap)
     vec3 F0_rgb = evalLabPBRF0(mat.f0, mat.albedo);
     bool isMetal = isLabPBRMetal(mat.f0);
     vec3 directSpec = vec3(0.0);
-    if (NdotL > 0.0 && shadowVis > 0.0) {
+    if (NdotL > 0.0 && maxOf(shadowVis) > 0.0) {
         vec3 H = normalize(lightDir + viewDir);
         float NdotH = max(dot(mat.shadeNormal, H), 0.0);
         float alpha = max(mat.roughness * mat.roughness, 0.015);
@@ -67,7 +67,7 @@ void main() {
 
     vec3 diffuseGI  = max(texelFetch(colortex3, px, 0).rgb, vec3(0.0));
     vec3 specularGI = max(texelFetch(colortex4, px, 0).rgb, vec3(0.0));
-    vec3 emissive   = mat.albedo * (mat.emission * EMISSIVE_SCALE);
+    vec3 emissive   = (mat.emission > 0.0) ? (evalDirectEmitterColor(mat.albedo) * (mat.emission * EMISSIVE_SCALE)) : vec3(0.0);
 
     vec3 F_env = fresnelSchlick(F0_rgb, max(dot(mat.shadeNormal, viewDir), 0.0));
     float specMask = (mat.roughness <= SPECULAR_ROUGH_CUTOFF && !mat.isHand) ? 1.0 : 0.0;
@@ -76,8 +76,9 @@ void main() {
     vec3 diffuseLit = directDiffuse * kD + (diffuseGI * mat.albedo) * kD + emissive;
     vec3 finalLit   = diffuseLit + directSpec + specularGI * F_env * specMask;
 
-    // Store pure diffuse+emissive radiance in colortex5 so SSRT matches traceScene energy cleanly.
-    imageStore(colorimg5, px, vec4(diffuseLit, 1.0));
+    // Store pure diffuse+emissive radiance in colortex5.rgb, and emission flag in .a so
+    // DIFFUSE_SSRT can stay enabled alongside NEE without double-counting block lamps!
+    imageStore(colorimg5, px, vec4(diffuseLit, mat.emission));
 
     // Optional Debug Visualizations
     #if DEBUG_VIEW == 1 || DEBUG_VIEW == 2

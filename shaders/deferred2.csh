@@ -41,8 +41,8 @@ void main() {
 
     vec3 raw = max(texelFetch(colortex3, px, 0).rgb, vec3(0.0));
     if (any(isnan(raw)) || any(isinf(raw))) raw = vec3(0.0);
-    // Preserve distant small-emitter hits (torches/lanterns at 5-14 blocks) while suppressing extreme spikes.
-    vec3 curr = despike3x3(colortex3, px, res, raw, mat.geoNormal, mat.shadeNormal, depth, 10.0, 1.2);
+    // Preserve distant small-emitter hits while suppressing extreme multi-light fireflies.
+    vec3 curr = despike3x3(colortex3, px, res, raw, mat.geoNormal, mat.shadeNormal, depth, 6.0, 0.8);
     float currLuma = luma(curr);
 
     // Bilinear geometric reprojection against prevGuideTex (exact integer normal decode).
@@ -98,12 +98,15 @@ void main() {
     float age = min(DIFFUSE_MAX_HISTORY, oldAge + 1.0);
     float alpha = 1.0 / max(age, 1.0);
 
-    // Variance-aware responsive history (stable on dark night scenes, fast on real light changes).
+    // Variance-aware responsive history (stable on dark/multi-lantern scenes, fast on real light changes).
+    // Feed fastLuma a spike-guarded sample so a single rare 1-SPP lantern firefly NEVER wipes out
+    // 96 frames of converged history and creates a pulsing light blotch!
     float fastAlpha = 1.0 / min(age, 12.0);
-    float fastLuma  = mix(oldFast.x, currLuma, fastAlpha);
+    float fastSafeLuma = (oldAge > 8.0) ? min(currLuma, max(oldFast.y * 4.0 + 0.5, 1.5)) : currLuma;
+    float fastLuma  = mix(oldFast.x, fastSafeLuma, fastAlpha);
     float slowLuma  = mix(oldFast.y, currLuma, alpha);
 
-    vec2 moments = mix(oldMom, vec2(currLuma, currLuma * currLuma), alpha);
+    vec2 moments = mix(oldMom, vec2(fastSafeLuma, fastSafeLuma * fastSafeLuma), alpha);
     float stdDev = sqrt(max(moments.y - moments.x * moments.x, 0.0));
 
     float noiseFloor = 3.5 * stdDev * inversesqrt(12.0) + 0.035;
@@ -117,7 +120,16 @@ void main() {
         if (response > 0.65) slowLuma = fastLuma;
     }
 
-    vec3 integrated = mix(oldSlow, curr, alpha);
+    // Soft temporal firefly guard on settled pixels prevents isolated 20x spikes from pulsing.
+    vec3 safeCurr = curr;
+    if (oldAge >= 12.0 && response < 0.25) {
+        float maxSettledLuma = max(luma(oldSlow) * 12.0 + 2.5, 4.0);
+        if (currLuma > maxSettledLuma) {
+            safeCurr *= maxSettledLuma / max(currLuma, 1e-6);
+        }
+    }
+
+    vec3 integrated = mix(oldSlow, safeCurr, alpha);
 
     imageStore(diffHistImg, px + currSlowOff, roundHalf(vec4(integrated, age)));
     imageStore(diffHistImg, px + currFastOff, roundHalf(vec4(fastLuma, slowLuma, age, 0.0)));

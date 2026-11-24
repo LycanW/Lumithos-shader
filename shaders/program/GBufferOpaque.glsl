@@ -79,15 +79,16 @@
 
         float roughness = 0.92;
         float f0 = 0.04;
-        float emission = vBlockEmit;
+        float pbrEmit = 0.0;
         #if defined(MC_SPECULAR_MAP) && !defined(STAGE_BASIC)
             ivec2 sRes = max(textureSize(specular, 0), ivec2(1));
             ivec2 sPx  = clamp(ivec2(fract(vTexCoord) * vec2(sRes)), ivec2(0), sRes - 1);
             vec4 specTex = texelFetch(specular, sPx, 0);
-            float pbrEmit = 0.0;
             decodeLabPBR(specTex, roughness, f0, pbrEmit);
-            emission = max(emission, pbrEmit);
         #endif
+        float maxAlb = maxOf(srgbToLinear(albedoSrgb));
+        float emitMask = (pbrEmit > 0.0) ? 1.0 : smoothstep(0.12, 0.42, maxAlb);
+        float emission = max(vBlockEmit * emitMask, pbrEmit);
 
         bool isHand = false;
         #ifdef STAGE_HAND
