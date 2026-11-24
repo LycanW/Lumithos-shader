@@ -31,11 +31,6 @@ layout(location = 0) out vec4 radianceOut;
 layout(location = 1) out vec4 transmitOut;
 layout(location = 2) out vec4 refractOut;
 
-float linZ(float depth) {
-    float ndcZ = depth * 2.0 - 1.0;
-    return -gbufferProjectionInverse[3][2] / max(gbufferProjectionInverse[2][3] * ndcZ + gbufferProjectionInverse[3][3], 1e-6);
-}
-
 // ---- Procedural water wave height (sum of directional Gerstner-like sines + value noise detail) ----
 float hash12(vec2 p) {
     vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -128,8 +123,8 @@ float traceTranslucentSSR(vec3 viewPos, vec3 viewR, float dither, out vec3 hitCo
             if (m.z > md) b = m; else a = m;
         }
         float bd = texelFetch(depthtex1, ivec2(b.xy * res), 0).r;
-        float diffZ = linZ(b.z) - linZ(bd);
-        if (bd < 0.999999 && diffZ > -0.05 && diffZ < 0.35 + 0.04 * linZ(bd)) {
+        float diffZ = linearizeDepth(b.z) - linearizeDepth(bd);
+        if (bd < 0.999999 && diffZ > -0.05 && diffZ < 0.35 + 0.04 * linearizeDepth(bd)) {
             hitCol = max(texelFetch(colortex5, ivec2(b.xy * res), 0).rgb, vec3(0.0));
             vec2 edge = min(b.xy, 1.0 - b.xy);
             if (any(isnan(hitCol)) || any(isinf(hitCol))) return 0.0;
@@ -297,8 +292,12 @@ void main() {
         T = transmittedFraction * (1.0 - diffuseOpacity) * glassT;
     }
 
-    float emission = max(pbrEmission, vBlockEmit * tex.a);
-    L += reflected + sunSpec + evalDirectEmitterColor(albedo) * (emission * EMISSIVE_SCALE);
+    float emission = pbrEmission;
+    if (emission <= 0.0 && vBlockEmit > 0.0 && !metal) {
+        float texMask = pow(saturate((maxOf(albedo) - 0.15) * (1.0 / 0.85)), 1.5);
+        emission = vBlockEmit * tex.a * texMask;
+    }
+    L += reflected + sunSpec + albedo * (emission * EMISSIVE_SCALE);
     L = max(L, vec3(0.0));
     T = clamp(T, vec3(0.0), vec3(1.0));
     if (any(isnan(L)) || any(isinf(L))) L = vec3(0.0);

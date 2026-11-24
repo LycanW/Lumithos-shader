@@ -256,9 +256,6 @@ void main() {
         bool useChecker = false;
     #endif
 
-    vec3 fillMin = vec3(0.0);
-    vec3 fillMax = vec3(0.0);
-    bool fillHasBounds = false;
     vec4 filledTap = vec4(0.0, 0.0, 0.0, 64.0);
     vec3 curr = vec3(0.0);
 
@@ -272,7 +269,7 @@ void main() {
                               mix(5.5, 3.0, roughT), mix(0.22, 0.05, roughT));
         }
     } else {
-        filledTap = checkerboardCrossFill(colortex4, px, res, geoNormal, shadeNormal, depth, true, roughness, fillMin, fillMax, fillHasBounds);
+        filledTap = checkerboardCrossFill(colortex4, px, res, geoNormal, shadeNormal, depth, true, roughness);
     }
     float currLuma = luma(curr);
 

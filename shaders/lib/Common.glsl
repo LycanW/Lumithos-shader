@@ -57,37 +57,6 @@ vec3 evalEmitterColor(vec3 albedoLinear, float blockEmit, float pbrEmit, out flo
     return richChroma * clamp(energy, 0.25, 1.35);
 }
 
-vec3 evalDirectEmitterColor(vec3 albedoLinear) {
-    float maxC = maxOf(albedoLinear);
-    if (maxC <= 1e-4) return vec3(0.0);
-    vec3 chroma = saturate(albedoLinear / maxC);
-    vec3 richChroma = pow(chroma, vec3(1.40));
-    float lumBase = max(luma(albedoLinear), 0.15 * maxC);
-    float lumRich = max(luma(richChroma), 0.12);
-    float energy = mix(maxC, lumBase / lumRich, 0.35);
-    return richChroma * clamp(energy, 0.25, 1.35);
-}
-
-// ---- Fast PCG Hash & RNG ----
-uint pcgHash(uint v) {
-    uint state = v * 747796405u + 2891336453u;
-    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    return (word >> 22u) ^ word;
-}
-
-uint initRng(ivec2 pixel, uint frame, uint salt) {
-    return pcgHash(uint(pixel.x) + uint(pixel.y) * 4099u + frame * 16777619u + salt * 2654435761u);
-}
-
-float nextFloat(inout uint rng) {
-    rng = pcgHash(rng);
-    return float(rng >> 8u) * (1.0 / 16777216.0);
-}
-
-vec2 nextVec2(inout uint rng) {
-    return vec2(nextFloat(rng), nextFloat(rng));
-}
-
 // ---- True Spatiotemporal Blue Noise (Heitz 2019: 16x16 Bayer-Ranked 2D Sobol + Stride-1 Temporal R2) ----
 // - Zero 4x4 white-noise tile seams: exact recursive 16x16 blue-noise stratification (33x less LF energy!).
 // - Stride-1 R2 temporal rotation (never frame<<4!) preserves exact spatial blue noise on every frame

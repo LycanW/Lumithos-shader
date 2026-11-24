@@ -15,6 +15,10 @@ uniform float far;
 uniform float rainStrength;
 uniform float wetness;
 uniform int   isEyeInWater;
+uniform int   heldItemId;
+uniform int   heldBlockLightValue;
+uniform int   heldItemId2;
+uniform int   heldBlockLightValue2;
 uniform float sunAngle;
 uniform float shadowAngle;
 uniform int   worldTime;
@@ -178,12 +182,14 @@ vec3 viewToScreen(vec3 viewPos) {
     return ndc * 0.5 + 0.5;
 }
 
-vec3 viewToWorld(vec3 viewPos) {
-    return (gbufferModelViewInverse * vec4(viewPos, 1.0)).xyz;
+// Fast exact linear view-space depth (-viewPos.z > 0) using 1 FMA + 1 RCP (no mat4 multiply!).
+float linearizeDepth(float depth) {
+    float ndcZ = depth * 2.0 - 1.0;
+    return -gbufferProjectionInverse[3][2] / max(gbufferProjectionInverse[2][3] * ndcZ + gbufferProjectionInverse[3][3], 1e-6);
 }
 
-vec3 worldToView(vec3 worldPos) {
-    return (gbufferModelView * vec4(worldPos, 1.0)).xyz;
+vec3 viewToWorld(vec3 viewPos) {
+    return (gbufferModelViewInverse * vec4(viewPos, 1.0)).xyz;
 }
 
 vec3 worldToVoxelPos(vec3 worldPos) {
@@ -205,13 +211,6 @@ float shadowDistortFactor(vec2 xy) {
 
 vec2 distortShadowXY(vec2 xy) {
     return xy / shadowDistortFactor(xy);
-}
-
-vec3 worldToShadowScreen(vec3 worldPos) {
-    vec4 sp = shadowProjection * (shadowModelView * vec4(worldPos, 1.0));
-    sp.xy = distortShadowXY(sp.xy);
-    sp.z *= 0.5;
-    return sp.xyz * 0.5 + 0.5;
 }
 
 // ---- Sun / Sky Directions ----

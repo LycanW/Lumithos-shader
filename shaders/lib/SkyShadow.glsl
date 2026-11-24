@@ -112,10 +112,6 @@ vec3 sampleShadowFastRay(vec3 worldPos, vec3 normal, vec3 inRayDir) {
     return evalShadowTapColored(sp.xy, sp.z - bias);
 }
 
-vec3 sampleShadowFast(vec3 worldPos, vec3 normal) {
-    return sampleShadowFastRay(worldPos, normal, vec3(0.0));
-}
-
 // Contact-Hardening Blue-Noise PCSS (8-tap Vogel Blocker Search + 12-tap Variable-Penumbra Colored PCF)
 // - Razor-sharp shadows at contact points, physically softening with blocker distance.
 // - Lossless early-out when 0 blockers are found (fast in open sunlight!).
@@ -179,11 +175,6 @@ vec3 sampleShadowPCSS(vec3 worldPos, vec3 normal, float blueNoise01) {
         sum += evalShadowTapColored(uv, sp.z - pcfBias);
     }
     return mix(vec3(1.0), sum * (1.0 / 12.0), borderFade);
-}
-
-// Keep alias for compatibility with any caller.
-vec3 sampleShadowPCF(vec3 worldPos, vec3 normal, float blueNoise01) {
-    return sampleShadowPCSS(worldPos, normal, blueNoise01);
 }
 
 #endif

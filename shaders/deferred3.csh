@@ -155,9 +155,7 @@ void main() {
             #if DIFFUSE_MODE == 0
                 vec3 filled = quarterBilinearFill(colortex3, px, res, qOff, geoNormal, shadeNormal, depth);
             #else
-                vec3 fMin, fMax;
-                bool fHas;
-                vec3 filled = checkerboardCrossFill(colortex3, px, res, geoNormal, shadeNormal, depth, false, 0.0, fMin, fMax, fHas).rgb;
+                vec3 filled = checkerboardCrossFill(colortex3, px, res, geoNormal, shadeNormal, depth, false, 0.0).rgb;
             #endif
             float fl = luma(filled);
             imageStore(diffHistImg, px + currSlowOff, roundHalf(vec4(filled, 0.5)));

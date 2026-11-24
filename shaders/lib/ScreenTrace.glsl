@@ -3,12 +3,6 @@
 
 #include "/lib/SVGF.glsl"
 
-// Fast exact linear view-space depth (-viewPos.z > 0) using 1 FMA + 1 RCP (no mat4 multiply!).
-float linearizeDepth(float depth) {
-    float ndcZ = depth * 2.0 - 1.0;
-    return -gbufferProjectionInverse[3][2] / max(gbufferProjectionInverse[2][3] * ndcZ + gbufferProjectionInverse[3][3], 1e-6);
-}
-
 // Linear-Z verified screen-space raytrace (SSRT for diffuse, SSR for specular).
 // Uses view-space linear thickness (never non-linear depth slabs) and reprojects
 // hit coordinates into previous frame UV so colortex5 stays rock-solid during motion.

@@ -41,15 +41,6 @@ vec2 reprojectScreenUV(vec2 currUV, vec3 worldPos) {
     return currUV + (prevUnjitUV - currUnjitUV);
 }
 
-// Reversible Karis perceptual tonemap for flicker-free HDR TAA blending.
-vec3 karisForward(vec3 c) {
-    return c / (1.0 + luma(max(c, vec3(0.0))));
-}
-
-vec3 karisInverse(vec3 c) {
-    return c / max(1.0 - luma(max(c, vec3(0.0))), 1e-4);
-}
-
 // Filter-independent 12-tap cornerless Catmull-Rom bicubic history fetch via texelFetch:
 // - 1-tap exact fast-path when static (zero overhead).
 // - Tile-clamped (`tileOff`) for race-free ping-pong TAA history without cross-tile bleed!
@@ -108,17 +99,6 @@ vec4 fetchHistoryFast4(sampler2D tex, vec2 uv, ivec2 res, ivec2 tileOff) {
     float wNorm = 1.0 - (w0.x + w3.x) * (w0.y + w3.y);
     float aBilin = mix(mix(t11.a, t21.a, f.x), mix(t12.a, t22.a, f.x), f.y);
     return vec4(max(sum / max(wNorm, 1e-4), vec3(0.0)), max(aBilin, 0.0));
-}
-
-// YCoCg AABB ray-clipping (Karis / Salvi): pulls out-of-gamut history straight toward AABB center
-// instead of sliding along box faces, eliminating smeared ghost halos on high-contrast sign text!
-vec3 clipAABB(vec3 aabbMin, vec3 aabbMax, vec3 prev) {
-    vec3 center = 0.5 * (aabbMax + aabbMin);
-    vec3 extent = 0.5 * (aabbMax - aabbMin) + vec3(1e-5);
-    vec3 vClip = prev - center;
-    vec3 vUnit = vClip / extent;
-    float maxUnit = max(abs(vUnit.x), max(abs(vUnit.y), abs(vUnit.z)));
-    return (maxUnit > 1.0) ? (center + vClip / maxUnit) : prev;
 }
 
 // Geometry-aware 3x3 RCRS firefly despike (preserves chromaticity) with depth-only fallback
@@ -210,7 +190,7 @@ vec3 despikeCheckerboard(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol
 // Geometry-aware 4-neighbor axial cross-fill for disoccluded checkerboard-untraced pixels:
 // All 4 axial neighbors ((±1,0), (0,±1)) are guaranteed traced on the current frame!
 vec4 checkerboardCrossFill(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 geoN, vec3 shadeN, float centerDepth,
-                           bool checkRough, float centerRough, out vec3 outMin, out vec3 outMax, out bool outHasBounds) {
+                           bool checkRough, float centerRough) {
     const ivec2 offs[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
     vec3 sumCol = vec3(0.0);
     float sumDist = 0.0;
@@ -218,9 +198,6 @@ vec4 checkerboardCrossFill(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 geoN, v
     vec3 fallbackCol = vec3(0.0);
     float fallbackDist = 64.0;
     float bestFallW = -1.0;
-    outMin = vec3( 1e6);
-    outMax = vec3(-1e6);
-    outHasBounds = false;
 
     for (int i = 0; i < 4; ++i) {
         ivec2 q = px + offs[i];
@@ -259,18 +236,12 @@ vec4 checkerboardCrossFill(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 geoN, v
         sumCol  += w * qc;
         sumDist += w * qt.a;
         sumW    += w;
-        outMin = min(outMin, qc);
-        outMax = max(outMax, qc);
-        outHasBounds = true;
     }
 
     if (sumW > 1e-5) {
         return vec4(sumCol / sumW, sumDist / sumW);
     }
     if (bestFallW >= 0.0) {
-        outMin = fallbackCol;
-        outMax = fallbackCol;
-        outHasBounds = true;
         return vec4(fallbackCol, fallbackDist);
     }
     return vec4(0.0, 0.0, 0.0, 64.0);

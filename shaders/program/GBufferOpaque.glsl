@@ -123,9 +123,17 @@
             }
         }
 
-        float maxAlb = maxOf(srgbToLinear(albedoSrgb));
-        float emitMask = (pbrEmit > 0.0) ? 1.0 : smoothstep(0.12, 0.42, maxAlb);
-        float emission = max(vBlockEmit * emitMask, pbrEmit);
+        // Texture-faithful per-texel emission:
+        // - LabPBR specular.a (pbrEmit > 0) drives emission strictly per-texel.
+        // - Non-emissive LabPBR metal frames (e.g. lantern iron cages) never falsely glow from vBlockEmit.
+        // - Vanilla / non-LabPBR emitters modulate vBlockEmit smoothly by linear texture brightness
+        //   so dark frames, cracks, and sticks stay dark while bright lamp panes/cores emit faithfully.
+        float emission = pbrEmit;
+        if (emission <= 0.0 && vBlockEmit > 0.0 && !isLabPBRMetal(f0)) {
+            float maxAlb = maxOf(srgbToLinear(albedoSrgb));
+            float texMask = pow(saturate((maxAlb - 0.15) * (1.0 / 0.85)), 1.5);
+            emission = vBlockEmit * texMask;
+        }
 
         gbuf0Out = packGBuffer0(albedoSrgb, roughness, f0, emission, vSkyLight, sss, matAO, isHand);
         gbuf1Out = packGBuffer1(geoNormal, shadeNormal);
