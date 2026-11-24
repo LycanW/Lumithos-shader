@@ -13,7 +13,7 @@ layout(triangle_strip, max_vertices = 3) out;
 uniform int renderStage;
 uniform sampler2D gtexture;
 
-in vec3  vWorldPos[3];
+in vec3  vVoxelPos[3];
 in vec2  vTexCoord[3];
 in vec4  vColor[3];
 in float vSkyLight[3];
@@ -22,6 +22,7 @@ in vec4  vShadowClip[3];
 
 out vec2 gTexCoord;
 out vec4 gColor;
+flat out int gNeedTex;
 
 void writeTintAndSky(uint slot, vec3 avgColor, float avgSky, bool isTinted, uint emissive4) {
     uint packedTint = packTintAndSky(isTinted ? avgColor : vec3(1.0), avgSky);
@@ -45,9 +46,9 @@ void registerEmissiveVoxel(uint slot, ivec3 vCoord, uint emissive4) {
 }
 
 void voxelizeTerrainTriangle() {
-    vec3 vp0 = worldToVoxelPos(vWorldPos[0]);
-    vec3 vp1 = worldToVoxelPos(vWorldPos[1]);
-    vec3 vp2 = worldToVoxelPos(vWorldPos[2]);
+    vec3 vp0 = vVoxelPos[0];
+    vec3 vp1 = vVoxelPos[1];
+    vec3 vp2 = vVoxelPos[2];
 
     // Fast AABB early-out for triangles strictly outside the 160x96x160 voxel grid (80..128 blocks away):
     // skips cross/normalize/log2/atomics on ~60% of shadow-pass geometry!
@@ -75,6 +76,7 @@ void voxelizeTerrainTriangle() {
     ivec3 vCoord = ivec3(floor(centroidPos - faceNormal * 0.004));
     bool isTrack1 = false;
     uint faceIdx  = normalToFaceIndex(faceNormal);
+    vec3 localSum = vec3(0.0);
 
     if (inVoxelBounds(vCoord) && maxOf(abs(faceNormal)) > 0.999) {
         vec3 local0 = vp0 - vec3(vCoord);
@@ -96,11 +98,21 @@ void voxelizeTerrainTriangle() {
                      && all(greaterThanEqual(bMin, vec3(-0.005)))
                      && all(lessThanEqual(bMax, vec3(1.005)));
         isTrack1 = onPlane && fullSpan;
+        localSum = local0 + local1 + local2;
     }
 
     if (isTrack1) {
         vec3 T, B;
         faceBasis(faceIdx, T, B);
+        // Track-1 Quad Deduplication: every full-cube face splits into 2 triangles on [0,1]^2;
+        // pick strictly 1 of the 2 triangles -> 50% fewer imageStore + contended same-address atomics!
+        float sSum = dot(localSum, abs(T));
+        float tSum = dot(localSum, abs(B));
+        float stSum = sSum + tSum;
+        if (stSum > 3.5 || (stSum >= 2.5 && sSum < tSum)) {
+            return;
+        }
+
         float ds1 = dot(e1, T), dt1 = dot(e1, B);
         float ds2 = dot(e2, T), dt2 = dot(e2, B);
         float det = ds1 * dt2 - dt1 * ds2;
@@ -189,16 +201,18 @@ void main() {
         voxelizeTerrainTriangle();
     }
 
-    vec2 cMin = min(vShadowClip[0].xy, min(vShadowClip[1].xy, vShadowClip[2].xy));
-    vec2 cMax = max(vShadowClip[0].xy, max(vShadowClip[1].xy, vShadowClip[2].xy));
-    if (cMax.x < -1.05 || cMin.x > 1.05 || cMax.y < -1.05 || cMin.y > 1.05) {
+    vec3 cMin = min(vShadowClip[0].xyz, min(vShadowClip[1].xyz, vShadowClip[2].xyz));
+    vec3 cMax = max(vShadowClip[0].xyz, max(vShadowClip[1].xyz, vShadowClip[2].xyz));
+    if (cMax.x < -1.05 || cMin.x > 1.05 || cMax.y < -1.05 || cMin.y > 1.05 || cMax.z < -1.0 || cMin.z > 1.0) {
         return;
     }
 
+    int needTex = (renderStage != MC_RENDER_STAGE_TERRAIN_SOLID) ? 1 : 0;
     for (int i = 0; i < 3; ++i) {
         gl_Position = vShadowClip[i];
         gTexCoord   = vTexCoord[i];
         gColor      = vColor[i];
+        gNeedTex    = needTex;
         EmitVertex();
     }
     EndPrimitive();

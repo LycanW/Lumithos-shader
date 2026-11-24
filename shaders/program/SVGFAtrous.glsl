@@ -59,8 +59,8 @@ void main() {
     ivec2 srcOff = ivec2(ATROUS_SRC_TILE * res.x, 0);
     vec4 center = texelFetch(scratchTex, px + srcOff, 0);
 
-    // Pure flat mirrors pass through untouched (preserving hitDist in .a for virtual-depth TAA).
-    if (isSpec && rough < 0.08 && dot(shadeNormal, geoNormal) > 0.998) {
+    // Pure flat & near-mirror specular bypass spatial blur completely (skip 9-tap variance & unprojection!).
+    if (isSpec && rough <= 0.14) {
         #ifdef ATROUS_WRITE_COLORTEX4
             imageStore(colorimg4, px, roundHalf(center));
         #else
@@ -91,8 +91,12 @@ void main() {
     float phiLuma = isSpec
         ? max(4.5 * stdDev, 0.008)
         : max(6.5 * stdDev, 0.015 * max(centerLuma, 0.20));
-    vec2 uv = (vec2(px) + 0.5) * texelSize();
-    vec3 centerWorld = viewToWorld(screenToView(vec3(uv, depth)));
+    vec2 centerNdc = ((vec2(px) + 0.5) * texelSize()) * 2.0 - 1.0;
+    #ifdef TAA_ENABLED
+        centerNdc -= taaJitter;
+    #endif
+    vec3 centerView = fastScreenToViewNdc(centerNdc, depth);
+    vec3 centerViewGeoN = normalize(mat3(gbufferModelView) * geoNormal);
 
     int stride = isSpec
         ? max(1, int(round(float(1 << ATROUS_PASS) * (1.0 + 4.0 * rough))))
@@ -103,26 +107,22 @@ void main() {
     float sumVar = center.a * center.a;
     float sumW = 1.0;
 
-    // Skip spatial blur on near-mirror specular so reflections remain razor-sharp.
-    bool runSpatial = !isSpec || rough > 0.14;
-    if (runSpatial) {
-        for (int y = -1; y <= 1; ++y) {
-            for (int x = -1; x <= 1; ++x) {
-                if (x == 0 && y == 0) continue;
-                ivec2 q = px + ivec2(x, y) * stride;
-                if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            if (x == 0 && y == 0) continue;
+            ivec2 q = px + ivec2(x, y) * stride;
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
 
-                vec4 tap = texelFetch(scratchTex, q + srcOff, 0);
-                float wGeo = atrousWeight(centerWorld, geoNormal, shadeNormal, centerLuma, phiLuma, q, isSpec, rough);
-                if (wGeo <= 1e-5) continue;
+            float wGeo = atrousWeight(centerView, centerViewGeoN, geoNormal, shadeNormal, q, isSpec, rough);
+            if (wGeo <= 1e-5) continue;
 
-                float wLuma = exp(-abs(centerLuma - luma(tap.rgb)) / phiLuma);
-                float w = k[abs(x)] * k[abs(y)] * wGeo * wLuma;
+            vec4 tap = texelFetch(scratchTex, q + srcOff, 0);
+            float wLuma = exp(-abs(centerLuma - luma(tap.rgb)) / phiLuma);
+            float w = k[abs(x)] * k[abs(y)] * wGeo * wLuma;
 
-                sumCol += w * tap.rgb;
-                sumVar += w * w * (tap.a * tap.a);
-                sumW   += w;
-            }
+            sumCol += w * tap.rgb;
+            sumVar += w * w * (tap.a * tap.a);
+            sumW   += w;
         }
     }
 

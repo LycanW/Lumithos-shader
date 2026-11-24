@@ -4,7 +4,7 @@
 
 in vec4 at_midBlock;
 
-out vec3  vWorldPos;
+out vec3  vVoxelPos;
 out vec2  vTexCoord;
 out vec4  vColor;
 out float vSkyLight;
@@ -13,7 +13,8 @@ out vec4  vShadowClip;
 
 void main() {
     vec3 shadowViewPos = (gl_ModelViewMatrix * gl_Vertex).xyz;
-    vWorldPos = (shadowModelViewInverse * vec4(shadowViewPos, 1.0)).xyz;
+    vec3 worldPos = (shadowModelViewInverse * vec4(shadowViewPos, 1.0)).xyz;
+    vVoxelPos = worldToVoxelPos(worldPos);
 
     vec4 clipPos = gl_ProjectionMatrix * vec4(shadowViewPos, 1.0);
     clipPos.xy = distortShadowXY(clipPos.xy);

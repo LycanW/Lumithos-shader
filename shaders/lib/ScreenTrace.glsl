@@ -3,11 +3,10 @@
 
 #include "/lib/SVGF.glsl"
 
-// Reconstruct linear view-space depth (-viewPos.z > 0) from NDC depth [0, 1].
+// Fast exact linear view-space depth (-viewPos.z > 0) using 1 FMA + 1 RCP (no mat4 multiply!).
 float linearizeDepth(float depth) {
     float ndcZ = depth * 2.0 - 1.0;
-    vec4 v = gbufferProjectionInverse * vec4(0.0, 0.0, ndcZ, 1.0);
-    return -v.z / max(v.w, 1e-6);
+    return -gbufferProjectionInverse[3][2] / max(gbufferProjectionInverse[2][3] * ndcZ + gbufferProjectionInverse[3][3], 1e-6);
 }
 
 // Linear-Z verified screen-space raytrace (SSRT for diffuse, SSR for specular).
@@ -44,7 +43,8 @@ bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float maxScreen
         }
         ivec2 px = ivec2(p.xy * res);
         float sceneDepth = texelFetch(depthtex1, px, 0).r;
-        if (sceneDepth >= 0.999999) continue;
+        // Fast monotonic NDC early-out: skips ~95% of empty-air march steps before any depth division!
+        if (sceneDepth >= 0.999999 || p.z <= sceneDepth) continue;
 
         float rayLinZ   = linearizeDepth(p.z);
         float sceneLinZ = linearizeDepth(sceneDepth);

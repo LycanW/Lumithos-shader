@@ -8,13 +8,30 @@
 #include "/lib/RadianceCache.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
+#ifdef DIFFUSE_CHECKERBOARD
+    #if DEBUG_VIEW != 1
+        #define USE_DIFFUSE_CB
+    #endif
+#endif
+
+#ifdef USE_DIFFUSE_CB
+const vec2 workGroupsRender = vec2(0.5, 1.0);
+#else
 const vec2 workGroupsRender = vec2(1.0, 1.0);
+#endif
 
 layout(rgba16f) uniform writeonly image2D colorimg3;
 
 void main() {
-    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 tid = ivec2(gl_GlobalInvocationID.xy);
     ivec2 res = ivec2(screenSize());
+    #ifdef USE_DIFFUSE_CB
+        ivec2 px = ivec2(tid.x * 2 + ((tid.y ^ frameCounter) & 1), tid.y);
+        ivec2 bnPx = tid;
+    #else
+        ivec2 px = tid;
+        ivec2 bnPx = px;
+    #endif
     if (any(greaterThanEqual(px, res))) return;
 
     float depth = texelFetch(depthtex1, px, 0).r;
@@ -32,20 +49,25 @@ void main() {
     vec2 uv = (vec2(px) + 0.5) * texelSize();
     vec3 viewPos  = screenToView(vec3(uv, depth));
     vec3 worldPos = viewToWorld(viewPos);
-    uint rng = initRng(px, uint(frameCounter), 1u);
 
-    // Query L1 SH Radiance Cache for primary-hit vMF path guiding (1/16 pixels allocate).
+    // Query L1 SH Radiance Cache for primary-hit vMF path guiding (1/16 screen pixels allocate).
     vec3 guideDir = shadeNormal;
     float guideKappa = 0.0;
     float guideProb = 0.0;
-    bool allowAlloc = !isHand
-                   && (((px.x ^ frameCounter) & 3) == 0)
-                   && (((px.y ^ (frameCounter >> 2)) & 3) == 0);
-    bool useGuide = !isHand && queryRCPathGuide(worldPos, geoNormal, allowAlloc, stbn2D(px, frameCounter, 3u), guideDir, guideKappa, guideProb);
+    #ifdef USE_DIFFUSE_CB
+        bool allowAlloc = !isHand
+                       && (((tid.x ^ frameCounter) & 3) == 0)
+                       && (((tid.y ^ (frameCounter >> 2)) & 1) == 0);
+    #else
+        bool allowAlloc = !isHand
+                       && (((px.x ^ frameCounter) & 3) == 0)
+                       && (((px.y ^ (frameCounter >> 2)) & 3) == 0);
+    #endif
+    bool useGuide = !isHand && queryRCPathGuide(worldPos, geoNormal, allowAlloc, stbn2D(bnPx, frameCounter, 3u), guideDir, guideKappa, guideProb);
 
-    vec2 uDir = stbn2D(px, frameCounter, 0u);
+    vec2 uDir = stbn2D(bnPx, frameCounter, 0u);
     vec3 rayDir;
-    if (useGuide && stbn2D(px, frameCounter, 4u).x < guideProb) {
+    if (useGuide && stbn2D(bnPx, frameCounter, 4u).x < guideProb) {
         rayDir = sampleVMF(guideDir, guideKappa, uDir);
     } else {
         rayDir = sampleCosineHemisphere(shadeNormal, uDir);
@@ -71,7 +93,7 @@ void main() {
         if (!isHand && frameCounter > 1) {
             vec2 prevHitUV;
             float ssDist;
-            if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * geoNormal) * 0.04, rayDir, 8, 0.18, stbn2D(px, frameCounter, 9u).x, 0.25, prevHitUV, ssDist)) {
+            if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * geoNormal) * 0.04, rayDir, 8, 0.18, stbn2D(bnPx, frameCounter, 9u).x, 0.25, prevHitUV, ssDist)) {
                 ivec2 hpx = clamp(ivec2(prevHitUV * screenSize()), ivec2(0), res - 1);
                 vec4 prevTap = texelFetch(colortex5, hpx, 0);
                 // Keep DIFFUSE_SSRT active on 99.9% of surfaces; only skip emissive pixels when NEE is active!
@@ -102,7 +124,7 @@ void main() {
                 radiance += hit.albedo * INV_PI * getDirectLightColor() * (NdotL * vis);
             }
 
-            vec3 bounce = queryRadianceCacheStochastic(hit.worldPos, hit.normal, 0u, stbn2D(px, frameCounter, 5u));
+            vec3 bounce = queryRadianceCacheStochastic(hit.worldPos, hit.normal, 0u, stbn2D(bnPx, frameCounter, 5u));
             radiance += hit.albedo * bounce * 0.85;
             radiance *= hit.throughput;
         } else if (hit.exitedGrid) {

@@ -1,24 +1,30 @@
 #version 430 compatibility
 
 // Pass: Karis-Tonemapped YCoCg TAA with 3x3 Closest-Depth Velocity Dilation & Exact Catmull-Rom
+// Ping-pong taaHistImg (2x1 tiles) lets final.fsh read directly — eliminates composite1.csh copy pass!
 #include "/lib/SVGF.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 const vec2 workGroupsRender = vec2(1.0, 1.0);
 
 uniform sampler2D taaHistTex;
-layout(rgba16f) uniform writeonly image2D scratchImg;
+layout(rgba16f) uniform writeonly image2D taaHistImg;
 
 void main() {
     ivec2 px = ivec2(gl_GlobalInvocationID.xy);
     ivec2 res = ivec2(screenSize());
     if (any(greaterThanEqual(px, res))) return;
 
+    int currSide = frameCounter & 1;
+    int prevSide = currSide ^ 1;
+    ivec2 currOff = ivec2(currSide * res.x, 0);
+    ivec2 prevOff = ivec2(prevSide * res.x, 0);
+
     vec3 curr = max(texelFetch(colortex0, px, 0).rgb, vec3(0.0));
     if (any(isnan(curr)) || any(isinf(curr))) curr = vec3(0.0);
 
     #if !defined(TAA_ENABLED) || DEBUG_VIEW == 1 || DEBUG_VIEW == 5
-        imageStore(scratchImg, px, roundHalf(vec4(curr, 1.0)));
+        imageStore(taaHistImg, px + currOff, roundHalf(vec4(curr, 1.0)));
         return;
     #endif
 
@@ -92,7 +98,7 @@ void main() {
     vec3 result = curr;
 
     if (frameCounter > 1 && validMotion && all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThan(prevUV, vec2(1.0)))) {
-        vec3 prev = fetchHistoryFast(taaHistTex, prevUV, res);
+        vec3 prev = fetchHistoryFast(taaHistTex, prevUV, res, prevOff);
         if (!any(isnan(prev)) && !any(isinf(prev))) {
             // 3x3 Karis-tonemapped YCoCg variance + min/max clipping (prevents HDR bright-edge flicker).
             vec3 m1 = vec3(0.0);
@@ -136,5 +142,5 @@ void main() {
         }
     }
 
-    imageStore(scratchImg, px, roundHalf(vec4(max(result, vec3(0.0)), 1.0)));
+    imageStore(taaHistImg, px + currOff, roundHalf(vec4(max(result, vec3(0.0)), 1.0)));
 }

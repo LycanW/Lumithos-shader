@@ -18,6 +18,8 @@
 
 #include "/lib/Resources.glsl"
 
+uniform sampler2D taaHistTex;
+
 in vec2 vUV;
 layout(location = 0) out vec4 fragColor;
 
@@ -32,7 +34,10 @@ vec3 tonemapACES(vec3 x) {
 }
 
 void main() {
-    vec3 hdr = max(textureLod(colortex0, vUV, 0.0).rgb, vec3(0.0));
+    ivec2 res = ivec2(screenSize());
+    ivec2 px = clamp(ivec2(gl_FragCoord.xy), ivec2(0), res - 1);
+    ivec2 currOff = ivec2((frameCounter & 1) * res.x, 0);
+    vec3 hdr = max(texelFetch(taaHistTex, px + currOff, 0).rgb, vec3(0.0));
     #if DEBUG_VIEW == 5
         vec3 ldr = hdr;
     #else

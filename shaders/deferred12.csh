@@ -2,9 +2,10 @@
 
 // Pass: Combine Direct Sunlight + Emission + Diffuse GI + Specular GI + Sky + Debug Views,
 // and publish prevGuideImg (exact float32 integers!) + diffuse-safe colortex5 (lit history).
-#include "/lib/Raytrace.glsl"
 #include "/lib/SkyShadow.glsl"
-#include "/lib/RadianceCache.glsl"
+#if DEBUG_VIEW == 4
+    #include "/lib/RadianceCache.glsl"
+#endif
 
 layout(local_size_x = 8, local_size_y = 8) in;
 const vec2 workGroupsRender = vec2(1.0, 1.0);
@@ -45,9 +46,12 @@ void main() {
 
     // Direct Sunlight / Moonlight (4-tap blue-noise-rotated colored PCF on Shadow Map)
     vec3 lightDir = getShadowLightDir();
+    vec3 directCol = getDirectLightColor();
     float NdotL = max(dot(mat.shadeNormal, lightDir), 0.0);
-    vec3 shadowVis = (NdotL > 0.0) ? sampleShadowPCF(worldPos, mat.geoNormal, stbn2D(px, frameCounter, 7u).x) : vec3(0.0);
-    vec3 directDiffuse = mat.albedo * INV_PI * getDirectLightColor() * (NdotL * shadowVis);
+    vec3 shadowVis = (NdotL > 0.0 && dot(mat.geoNormal, lightDir) > 0.0 && maxOf(directCol) > 1e-4)
+        ? sampleShadowPCF(worldPos, mat.geoNormal, stbn2D(px, frameCounter, 7u).x)
+        : vec3(0.0);
+    vec3 directDiffuse = mat.albedo * INV_PI * directCol * (NdotL * shadowVis);
 
     // Direct Specular Highlight (GGX with LabPBR RGB F0 & physical NDF cap)
     vec3 F0_rgb = evalLabPBRF0(mat.f0, mat.albedo);
@@ -61,7 +65,7 @@ void main() {
         float dDenom = NdotH * NdotH * (a2 - 1.0) + 1.0;
         float D = min(a2 / max(PI * dDenom * dDenom, 1e-5), 128.0);
         vec3 F = fresnelSchlick(F0_rgb, max(dot(H, viewDir), 0.0));
-        directSpec = F * D * 0.25 * getDirectLightColor() * (NdotL * shadowVis);
+        directSpec = F * D * 0.25 * directCol * (NdotL * shadowVis);
     }
 
     vec3 diffuseGI  = max(texelFetch(colortex3, px, 0).rgb, vec3(0.0));

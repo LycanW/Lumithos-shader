@@ -8,35 +8,15 @@
 #include "/lib/RadianceCache.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
+#ifdef SPECULAR_CHECKERBOARD
+const vec2 workGroupsRender = vec2(0.5, 1.0);
+#else
 const vec2 workGroupsRender = vec2(1.0, 1.0);
+#endif
 
 layout(rgba16f) uniform writeonly image2D colorimg4;
 
-void main() {
-    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 res = ivec2(screenSize());
-    if (any(greaterThanEqual(px, res))) return;
-
-    #ifndef SPECULAR_REFLECTIONS
-        imageStore(colorimg4, px, vec4(0.0));
-        return;
-    #endif
-
-    float depth = texelFetch(depthtex1, px, 0).r;
-    if (depth >= 0.999999) {
-        imageStore(colorimg4, px, vec4(0.0));
-        return;
-    }
-
-    // Fast roughness early-out BEFORE reading normals or unpacking albedo!
-    float roughness;
-    bool isHand;
-    readGBufferRoughHand(px, roughness, isHand);
-    if (roughness > SPECULAR_ROUGH_CUTOFF || isHand) {
-        imageStore(colorimg4, px, vec4(0.0));
-        return;
-    }
-
+vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roughness) {
     vec3 geoNormal, shadeNormal;
     readGBufferNormals(px, geoNormal, shadeNormal);
 
@@ -55,7 +35,7 @@ void main() {
     if (roughness < 0.08) {
         rayDir = reflect(-viewDir, shadeNormal);
     } else {
-        rayDir = sampleGGXVNDF(viewDir, shadeNormal, roughness, stbn2D(px, frameCounter, 2u));
+        rayDir = sampleGGXVNDF(viewDir, shadeNormal, roughness, stbn2D(bnPx, frameCounter, 2u));
     }
 
     if (dot(rayDir, geoNormal) <= 0.0) {
@@ -72,7 +52,7 @@ void main() {
         if (frameCounter > 1 && roughness >= 0.25) {
             vec2 prevHitUV;
             float ssDist;
-            if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * geoNormal) * 0.04, rayDir, 24, 0.65, stbn2D(px, frameCounter, 10u).x, 0.25, prevHitUV, ssDist)) {
+            if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * geoNormal) * 0.04, rayDir, 24, 0.65, stbn2D(bnPx, frameCounter, 10u).x, 0.25, prevHitUV, ssDist)) {
                 ivec2 hpx = clamp(ivec2(prevHitUV * screenSize()), ivec2(0), res - 1);
                 vec3 prevLit = texelFetch(colortex5, hpx, 0).rgb;
                 if (!any(isnan(prevLit)) && !any(isinf(prevLit))) {
@@ -104,8 +84,8 @@ void main() {
 
             vec3 skyAmb = evalSky(hit.normal, false) * (0.15 + 0.85 * hit.skyLight);
             vec3 bounce = (roughness < 0.25)
-                ? queryRadianceCacheSmooth(hit.worldPos, hit.normal, skyAmb, 0u, stbn2D(px, frameCounter, 6u))
-                : queryRadianceCacheStochastic(hit.worldPos, hit.normal, 0u, stbn2D(px, frameCounter, 6u));
+                ? queryRadianceCacheSmooth(hit.worldPos, hit.normal, skyAmb, 0u, stbn2D(bnPx, frameCounter, 6u))
+                : queryRadianceCacheStochastic(hit.worldPos, hit.normal, 0u, stbn2D(bnPx, frameCounter, 6u));
             radiance += hit.albedo * bounce * 0.85;
             radiance *= hit.throughput;
         } else if (hit.exitedGrid) {
@@ -119,5 +99,78 @@ void main() {
     radiance = min(max(radiance, vec3(0.0)), vec3(specClamp));
     if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
 
-    imageStore(colorimg4, px, vec4(radiance, hitDist));
+    return vec4(radiance, hitDist);
+}
+
+void main() {
+    ivec2 tid = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 res = ivec2(screenSize());
+
+    #ifdef SPECULAR_CHECKERBOARD
+        if (tid.y >= res.y) return;
+        int parity = (tid.y ^ frameCounter) & 1;
+        ivec2 pxA = ivec2(tid.x * 2 + parity, tid.y);
+        ivec2 pxB = ivec2(tid.x * 2 + (parity ^ 1), tid.y);
+
+        #ifndef SPECULAR_REFLECTIONS
+            if (pxA.x < res.x) imageStore(colorimg4, pxA, vec4(0.0));
+            if (pxB.x < res.x) imageStore(colorimg4, pxB, vec4(0.0));
+            return;
+        #endif
+
+        // Single call-site loop prevents compiler double-inlining of traceScene (keeps GRF registers & I-cache tight!):
+        // - slot 0 (active checkerboard pixel): always traces within specular cutoff (zero SIMD warp divergence!).
+        // - slot 1 (companion pixel): traces at 100% FULL RESOLUTION ONLY for smooth/flat mirrors (< 0.16);
+        //   rough glossy pixels (>= 0.16) exit uniformly with -1.0 sentinel for deferred9.csh!
+        for (int slot = 0; slot < 2; ++slot) {
+            ivec2 px = (slot == 0) ? pxA : pxB;
+            if (px.x >= res.x) continue;
+
+            float depth = texelFetch(depthtex1, px, 0).r;
+            if (depth >= 0.999999) {
+                imageStore(colorimg4, px, vec4(0.0));
+                continue;
+            }
+
+            float roughness;
+            bool isHand;
+            readGBufferRoughHand(px, roughness, isHand);
+            if (isHand || roughness > SPECULAR_ROUGH_CUTOFF) {
+                imageStore(colorimg4, px, vec4(0.0));
+                continue;
+            }
+
+            if (slot == 1 && roughness >= 0.16) {
+                imageStore(colorimg4, px, vec4(0.0, 0.0, 0.0, -1.0));
+                continue;
+            }
+
+            ivec2 bnPx = (slot == 0) ? tid : px;
+            imageStore(colorimg4, px, traceSpecularPixel(px, bnPx, res, depth, roughness));
+        }
+    #else
+        ivec2 px = tid;
+        if (any(greaterThanEqual(px, res))) return;
+
+        #ifndef SPECULAR_REFLECTIONS
+            imageStore(colorimg4, px, vec4(0.0));
+            return;
+        #endif
+
+        float depth = texelFetch(depthtex1, px, 0).r;
+        if (depth >= 0.999999) {
+            imageStore(colorimg4, px, vec4(0.0));
+            return;
+        }
+
+        float roughness;
+        bool isHand;
+        readGBufferRoughHand(px, roughness, isHand);
+        if (roughness > SPECULAR_ROUGH_CUTOFF || isHand) {
+            imageStore(colorimg4, px, vec4(0.0));
+            return;
+        }
+
+        imageStore(colorimg4, px, traceSpecularPixel(px, px, res, depth, roughness));
+    #endif
 }

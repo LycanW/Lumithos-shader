@@ -35,8 +35,12 @@ void main() {
     vec3 centerGeoN, centerShadeN;
     readGBufferNormals(px, centerGeoN, centerShadeN);
 
-    vec2 uv = (vec2(px) + 0.5) * texelSize();
-    vec3 viewPos = screenToView(vec3(uv, depth));
+    vec2 tSize = texelSize();
+    vec2 centerNdc = ((vec2(px) + 0.5) * tSize) * 2.0 - 1.0;
+    #ifdef TAA_ENABLED
+        centerNdc -= taaJitter;
+    #endif
+    vec3 viewPos = fastScreenToViewNdc(centerNdc, depth);
     vec3 viewGeoN = normalize(mat3(gbufferModelView) * centerGeoN);
 
     // Perspective-projected foreshortening shrinks steps along grazing surfaces.
@@ -50,6 +54,7 @@ void main() {
     if (baseStep == ivec2(0)) {
         baseStep = ivec2(sign(axis));
     }
+    vec2 stepNdc = vec2(baseStep) * (tSize * 2.0);
 
     float planeTol = max(0.035, 0.008 * (-viewPos.z));
     float lumaWeightScale = (DIFFUSE_1D_VAR_SCALE > 0.0)
@@ -64,7 +69,8 @@ void main() {
     const float kW[4]  = float[4](0.85, 0.85, 0.55, 0.55);
 
     for (int i = 0; i < 4; ++i) {
-        ivec2 q = px + baseStep * mults[i];
+        int m = mults[i];
+        ivec2 q = px + baseStep * m;
         if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
 
         float qd = texelFetch(depthtex1, q, 0).r;
@@ -74,12 +80,14 @@ void main() {
         readGBufferNormals(q, qGeoN, qShadeN);
         if (dot(centerGeoN, qGeoN) < 0.90) continue;
 
-        vec2 qUv = (vec2(q) + 0.5) * texelSize();
-        vec3 qViewPos = screenToView(vec3(qUv, qd));
+        vec3 qViewPos = fastScreenToViewNdc(centerNdc + stepNdc * float(m), qd);
         float planeDist = abs(dot(qViewPos - viewPos, viewGeoN));
         if (planeDist > planeTol) continue;
 
-        float wNorm = pow(max(dot(centerShadeN, qShadeN), 0.0), 8.0);
+        float sDot = max(dot(centerShadeN, qShadeN), 0.0);
+        float s2 = sDot * sDot;
+        float s4 = s2 * s2;
+        float wNorm = s4 * s4; // exact sDot^8 without exp2/log2!
         if (wNorm < 1e-4) continue;
 
         vec4 tap = texelFetch(scratchTex, q + srcOff, 0);

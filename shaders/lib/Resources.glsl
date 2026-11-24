@@ -154,6 +154,18 @@ vec3 screenToView(vec3 screenPos) {
     return vp.xyz / vp.w;
 }
 
+// Fast exact perspective unprojection (4 scalar muls + 1 rcp instead of 16-FMA mat4*vec4!).
+// Expects already-unjittered NDC XY and raw [0,1] depth buffer value.
+vec3 fastScreenToViewNdc(vec2 ndcXY, float depth) {
+    float ndcZ = depth * 2.0 - 1.0;
+    float invW = 1.0 / (gbufferProjectionInverse[2][3] * ndcZ + gbufferProjectionInverse[3][3]);
+    return vec3(
+        gbufferProjectionInverse[0][0] * ndcXY.x,
+        gbufferProjectionInverse[1][1] * ndcXY.y,
+        gbufferProjectionInverse[3][2]
+    ) * invW;
+}
+
 vec3 viewToScreen(vec3 viewPos) {
     vec4 cp = gbufferProjection * vec4(viewPos, 1.0);
     vec3 ndc = cp.xyz / cp.w;

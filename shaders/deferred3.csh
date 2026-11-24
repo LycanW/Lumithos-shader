@@ -44,11 +44,17 @@ void main() {
     vec3 worldPos = viewToWorld(viewPos);
     float expectedPrevDepth = -(gbufferPreviousModelView * vec4(worldPos + cameraVelocity, 1.0)).z;
 
-    vec3 raw = max(texelFetch(colortex3, px, 0).rgb, vec3(0.0));
-    if (any(isnan(raw)) || any(isinf(raw))) raw = vec3(0.0);
-    // Preserve distant small-emitter hits while suppressing extreme multi-light fireflies.
-    vec3 curr = despike3x3(colortex3, px, res, raw, geoNormal, shadeNormal, depth, 6.0, 0.8);
-    float currLuma = luma(curr);
+    #ifdef DIFFUSE_CHECKERBOARD
+        #if DEBUG_VIEW != 1
+            #define USE_DIFFUSE_CB
+        #endif
+    #endif
+
+    #ifdef USE_DIFFUSE_CB
+        bool isTraced = (((px.x ^ px.y ^ frameCounter) & 1) == 0);
+    #else
+        bool isTraced = true;
+    #endif
 
     // Bilinear geometric reprojection against prevGuideTex (exact integer normal decode).
     vec3 oldSlow = vec3(0.0);
@@ -99,6 +105,37 @@ void main() {
         oldFast /= support;
         oldMom  /= support;
     }
+
+    // Untraced checkerboard pixel: reuse exact reprojected history (zero blur on static/moving surfaces!)
+    // or cross-fill from the 4 adjacent traced pixels when disoccluded!
+    if (!isTraced) {
+        if (support > 1e-4) {
+            imageStore(diffHistImg, px + currSlowOff, roundHalf(vec4(oldSlow, oldAge)));
+            imageStore(diffHistImg, px + currFastOff, roundHalf(oldFast));
+            imageStore(diffMomImg,  px + currMomOff,  vec4(oldMom, 0.0, 0.0));
+            imageStore(scratchImg,  px,               roundHalf(vec4(oldSlow, max(oldAge, 1.0))));
+        } else {
+            vec3 fMin, fMax;
+            bool fHas;
+            vec3 filled = checkerboardCrossFill(colortex3, px, res, geoNormal, shadeNormal, depth, false, 0.0, fMin, fMax, fHas).rgb;
+            float fl = luma(filled);
+            imageStore(diffHistImg, px + currSlowOff, roundHalf(vec4(filled, 0.5)));
+            imageStore(diffHistImg, px + currFastOff, roundHalf(vec4(fl, fl, 0.5, 0.0)));
+            imageStore(diffMomImg,  px + currMomOff,  vec4(fl, fl * fl, 0.0, 0.0));
+            imageStore(scratchImg,  px,               roundHalf(vec4(filled, 1.0)));
+        }
+        return;
+    }
+
+    vec3 raw = max(texelFetch(colortex3, px, 0).rgb, vec3(0.0));
+    if (any(isnan(raw)) || any(isinf(raw))) raw = vec3(0.0);
+    // Preserve distant small-emitter hits while suppressing extreme multi-light fireflies.
+    #ifdef USE_DIFFUSE_CB
+        vec3 curr = despikeCheckerboard(colortex3, px, res, raw, geoNormal, shadeNormal, depth, 6.0, 0.8);
+    #else
+        vec3 curr = despike3x3(colortex3, px, res, raw, geoNormal, shadeNormal, depth, 6.0, 0.8);
+    #endif
+    float currLuma = luma(curr);
 
     float age = min(DIFFUSE_MAX_HISTORY, oldAge + 1.0);
     float alpha = 1.0 / max(age, 1.0);

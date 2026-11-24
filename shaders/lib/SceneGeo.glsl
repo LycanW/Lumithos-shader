@@ -150,4 +150,34 @@ void unpackScenePrim(ScenePrim pr, out vec3 p0, out vec3 e1, out vec3 e2, out ve
     isTranslucent = ((pr.meta.y >> 28u) & 1u) != 0u;
 }
 
+// Lazy Track-2 unpack: load ONLY 24B geometry + next pointer for Möller–Trumbore test (~98% miss!),
+// deferring UV/tint/material decode until an actual hit occurs!
+void unpackScenePrimGeo(uint idx, out vec3 p0, out vec3 e1, out vec3 e2, out uint nextIdx) {
+    uvec4 geo = primPool.prims[idx].geo;
+    uint uvx  = primPool.prims[idx].uv.x;
+    nextIdx   = primPool.prims[idx].meta.x;
+
+    vec2 g0 = unpackSnorm2x16(geo.x) * 2.0;
+    vec2 g1 = unpackSnorm2x16(geo.y) * 2.0;
+    vec2 g2 = unpackSnorm2x16(geo.z) * 2.0;
+    vec2 g3 = unpackSnorm2x16(geo.w) * 2.0;
+    vec2 g4 = unpackSnorm2x16(uvx)   * 2.0;
+
+    p0 = vec3(g0.x, g0.y, g1.x);
+    e1 = vec3(g1.y, g2.x, g2.y);
+    e2 = vec3(g3.x, g3.y, g4.x);
+}
+
+void unpackScenePrimShade(uint idx, out vec2 uv0, out vec2 uv1, out vec2 uv2, out vec3 tintSrgb, out float emissive, out bool isTranslucent) {
+    uvec4 uvw = primPool.prims[idx].uv;
+    uint metaY = primPool.prims[idx].meta.y;
+
+    uv0 = unpackUnorm2x16(uvw.y);
+    uv1 = unpackUnorm2x16(uvw.z);
+    uv2 = unpackUnorm2x16(uvw.w);
+    tintSrgb      = unpackUnorm4x8(metaY).rgb;
+    emissive      = float((metaY >> 24u) & 15u) * (1.0 / 15.0);
+    isTranslucent = ((metaY >> 28u) & 1u) != 0u;
+}
+
 #endif

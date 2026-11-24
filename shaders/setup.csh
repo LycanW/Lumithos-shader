@@ -3,6 +3,8 @@
 // One-time initialization of direct-addressed SurfaceVoxel pool, voxelGridImg,
 // O(1) 3-Cascade Radiance Cache clipmap, and worklist buffers.
 #define STAGE_VOXEL_GRID_WRITE
+#define STAGE_BRICK_WRITE
+#define STAGE_SUPER_WRITE
 #include "/lib/Resources.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
@@ -13,6 +15,12 @@ void main() {
     if (!inVoxelBounds(v)) return;
 
     imageStore(voxelGridImg, v, uvec4(0u));
+    if (all(lessThan(v, ivec3(BRICK_RES_XZ, BRICK_RES_Y, BRICK_RES_XZ)))) {
+        imageStore(brickOccImg, v, uvec4(0u));
+    }
+    if (all(lessThan(v, ivec3(SUPER_RES_XZ, SUPER_RES_Y, SUPER_RES_XZ)))) {
+        imageStore(superOccImg, v, uvec4(0u));
+    }
     uint slot = voxelLinearIndex(v);
     for (int f = 0; f < 6; ++f) surfacePool.surfaces[slot].face[f] = 0u;
     surfacePool.surfaces[slot].tintAndSky = 0u;

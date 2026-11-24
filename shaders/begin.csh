@@ -1,7 +1,8 @@
 #version 430 compatibility
 
-// Per-frame sparse clear: only resets SurfaceVoxel entries that were actually occupied
-// last frame (~1-3% of the grid -> <0.03 ms on GPU!), plus resets Track 2 primCount.
+// Per-frame hierarchical sparse clear:
+// Uses last frame's L1-resident superOccTex (600B) + L2-resident brickOccTex (38KB) so ~95% of
+// empty air/underground workgroups exit in 1 cached texture read without touching voxelGridImg!
 #define STAGE_VOXEL_GRID_WRITE
 #include "/lib/Resources.glsl"
 
@@ -16,6 +17,11 @@ void main() {
         primPool.primCount = 0u;
         lightList.lightCount = 0u;
     }
+
+    // 100% uniform across the entire 8x8x8 workgroup (half of a 16x16x16 super-brick)!
+    if (texelFetch(superOccTex, v >> 4, 0).r == 0u) return;
+    // 4x4x4 brick early-out before any uncached voxelGridImg load.
+    if (texelFetch(brickOccTex, v >> 2, 0).r == 0u) return;
 
     if (imageLoad(voxelGridImg, v).r != 0u) {
         imageStore(voxelGridImg, v, uvec4(0u));

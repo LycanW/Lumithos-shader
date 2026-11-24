@@ -24,6 +24,8 @@
 #define RC_WORKLIST_CAP    8192u
 
 // ---- Feature Toggles ----
+#define DIFFUSE_CHECKERBOARD
+#define SPECULAR_CHECKERBOARD
 #define DIFFUSE_SSRT
 #define SPECULAR_SSR
 #define PATH_GUIDING
@@ -33,9 +35,9 @@
 #define DEBUG_VIEW 0 // [0 1 2 3 4 5]
 
 // ---- Lighting & Tracing Tuning ----
-#define DIFFUSE_MAX_STEPS     80
+#define DIFFUSE_MAX_STEPS     64
 #define SPECULAR_MAX_STEPS    96
-#define RC_MAX_STEPS          80
+#define RC_MAX_STEPS          64
 #define RC_UPDATE_PERIOD      4u
 #define RC_WARMUP_UPDATES     12u
 #define RC_MAX_ACCUM          128.0

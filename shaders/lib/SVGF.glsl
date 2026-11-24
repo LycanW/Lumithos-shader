@@ -41,14 +41,14 @@ vec3 karisInverse(vec3 c) {
 
 // Filter-independent 12-tap cornerless Catmull-Rom bicubic history fetch via texelFetch:
 // - 1-tap exact fast-path when static (zero overhead).
-// - True bicubic resampling during motion eliminates repeated bilinear blur on sign text & pixel art!
-vec3 fetchHistoryFast(sampler2D tex, vec2 uv, ivec2 res) {
+// - Tile-clamped (`tileOff`) for race-free ping-pong TAA history without cross-tile bleed!
+vec3 fetchHistoryFast(sampler2D tex, vec2 uv, ivec2 res, ivec2 tileOff) {
     vec2 pos = uv * vec2(res) - 0.5;
     ivec2 base = ivec2(floor(pos));
     vec2 f = pos - vec2(base);
 
     if (abs(f.x) < 1e-4 && abs(f.y) < 1e-4) {
-        ivec2 p = clamp(base, ivec2(0), res - 1);
+        ivec2 p = clamp(base, ivec2(0), res - 1) + tileOff;
         return max(texelFetch(tex, p, 0).rgb, vec3(0.0));
     }
 
@@ -60,14 +60,14 @@ vec3 fetchHistoryFast(sampler2D tex, vec2 uv, ivec2 res) {
     vec2 w3 = 0.5 * (f3 - f2);
 
     ivec2 maxPx = res - 1;
-    int x0 = clamp(base.x - 1, 0, maxPx.x);
-    int x1 = clamp(base.x,     0, maxPx.x);
-    int x2 = clamp(base.x + 1, 0, maxPx.x);
-    int x3 = clamp(base.x + 2, 0, maxPx.x);
-    int y0 = clamp(base.y - 1, 0, maxPx.y);
-    int y1 = clamp(base.y,     0, maxPx.y);
-    int y2 = clamp(base.y + 1, 0, maxPx.y);
-    int y3 = clamp(base.y + 2, 0, maxPx.y);
+    int x0 = clamp(base.x - 1, 0, maxPx.x) + tileOff.x;
+    int x1 = clamp(base.x,     0, maxPx.x) + tileOff.x;
+    int x2 = clamp(base.x + 1, 0, maxPx.x) + tileOff.x;
+    int x3 = clamp(base.x + 2, 0, maxPx.x) + tileOff.x;
+    int y0 = clamp(base.y - 1, 0, maxPx.y) + tileOff.y;
+    int y1 = clamp(base.y,     0, maxPx.y) + tileOff.y;
+    int y2 = clamp(base.y + 1, 0, maxPx.y) + tileOff.y;
+    int y3 = clamp(base.y + 2, 0, maxPx.y) + tileOff.y;
 
     // 12-tap cornerless Catmull-Rom (drops the 4 <0.004-weight outer corners, renormalized exactly).
     vec3 sum = vec3(0.0);
@@ -118,7 +118,9 @@ vec3 despike3x3(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol, vec3 ge
             vec3 qGeoN, qShadeN;
             readGBufferNormals(q, qGeoN, qShadeN);
             if (dot(geoN, qGeoN) < 0.9 || dot(shadeN, qShadeN) < 0.45) continue;
-            vec3 qc = max(texelFetch(noisyTex, q, 0).rgb, vec3(0.0));
+            vec4 qt = texelFetch(noisyTex, q, 0);
+            if (qt.a < 0.0) continue;
+            vec3 qc = max(qt.rgb, vec3(0.0));
             if (any(isnan(qc)) || any(isinf(qc))) continue;
             float ql = luma(qc);
             if (ql > maxN) {
@@ -141,8 +143,121 @@ vec3 despike3x3(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol, vec3 ge
     return centerCol;
 }
 
-// Edge-stopping weight for lightweight 3x3 A-Trous.
-float atrousWeight(vec3 centerPos, vec3 centerGeoN, vec3 centerShadeN, float centerLuma, float phiLuma,
+// Same-parity 8-neighbor RCRS firefly despike for checkerboard-traced buffers:
+// Samples ONLY the 8 nearest same-parity traced pixels ((±1,±1) and (±2,0),(0,±2)),
+// never touching untraced axial neighbors!
+vec3 despikeCheckerboard(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol, vec3 geoN, vec3 shadeN, float centerDepth, float ratio, float floorVal) {
+    const ivec2 offs[8] = ivec2[8](
+        ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1),
+        ivec2(-2,  0), ivec2(2,  0), ivec2( 0,-2), ivec2(0, 2)
+    );
+    float cLuma = luma(centerCol);
+    float maxN = 0.0;
+    float secondMax = 0.0;
+    int valid = 0;
+    for (int i = 0; i < 8; ++i) {
+        ivec2 q = px + offs[i];
+        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
+        float qd = texelFetch(depthtex1, q, 0).r;
+        if (qd >= 0.999999 || abs(qd - centerDepth) > 0.018 * max(centerDepth, 0.01)) continue;
+        vec3 qGeoN, qShadeN;
+        readGBufferNormals(q, qGeoN, qShadeN);
+        if (dot(geoN, qGeoN) < 0.9 || dot(shadeN, qShadeN) < 0.45) continue;
+        vec4 qt = texelFetch(noisyTex, q, 0);
+        if (qt.a < 0.0) continue;
+        vec3 qc = max(qt.rgb, vec3(0.0));
+        if (any(isnan(qc)) || any(isinf(qc))) continue;
+        float ql = luma(qc);
+        if (ql > maxN) {
+            secondMax = maxN;
+            maxN = ql;
+        } else if (ql > secondMax) {
+            secondMax = ql;
+        }
+        ++valid;
+    }
+    if (valid >= 3) {
+        float refLuma = (valid >= 5) ? secondMax : maxN;
+        float lim = refLuma * ratio + floorVal;
+        if (cLuma > lim) {
+            return centerCol * (lim / max(cLuma, 1e-6));
+        }
+    }
+    return centerCol;
+}
+
+// Geometry-aware 4-neighbor axial cross-fill for disoccluded checkerboard-untraced pixels:
+// All 4 axial neighbors ((±1,0), (0,±1)) are guaranteed traced on the current frame!
+vec4 checkerboardCrossFill(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 geoN, vec3 shadeN, float centerDepth,
+                           bool checkRough, float centerRough, out vec3 outMin, out vec3 outMax, out bool outHasBounds) {
+    const ivec2 offs[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+    vec3 sumCol = vec3(0.0);
+    float sumDist = 0.0;
+    float sumW = 0.0;
+    vec3 fallbackCol = vec3(0.0);
+    float fallbackDist = 64.0;
+    float bestFallW = -1.0;
+    outMin = vec3( 1e6);
+    outMax = vec3(-1e6);
+    outHasBounds = false;
+
+    for (int i = 0; i < 4; ++i) {
+        ivec2 q = px + offs[i];
+        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
+        float qd = texelFetch(depthtex1, q, 0).r;
+        if (qd >= 0.999999) continue;
+
+        vec4 qt = texelFetch(noisyTex, q, 0);
+        if (qt.a < 0.0) continue;
+        vec3 qc = max(qt.rgb, vec3(0.0));
+        if (any(isnan(qc)) || any(isinf(qc))) continue;
+
+        vec3 qGeoN, qShadeN;
+        readGBufferNormals(q, qGeoN, qShadeN);
+        float dGeo = dot(geoN, qGeoN);
+        float depthDiff = abs(qd - centerDepth) / max(centerDepth, 0.01);
+        float fallW = max(dGeo, 0.0) / (1.0 + depthDiff * 40.0);
+        if (fallW > bestFallW) {
+            bestFallW = fallW;
+            fallbackCol = qc;
+            fallbackDist = qt.a;
+        }
+
+        if (dGeo < 0.90 || depthDiff > 0.025) continue;
+        float dShade = max(dot(shadeN, qShadeN), 0.0);
+        if (dShade < 0.45) continue;
+
+        float w = pow(dShade, 4.0);
+        if (checkRough) {
+            float qRough;
+            bool qHand;
+            readGBufferRoughHand(q, qRough, qHand);
+            if (qHand || qRough > SPECULAR_ROUGH_CUTOFF) continue;
+            w *= exp(-abs(centerRough - qRough) / max(0.03, 0.25 * max(centerRough, qRough)));
+        }
+        sumCol  += w * qc;
+        sumDist += w * qt.a;
+        sumW    += w;
+        outMin = min(outMin, qc);
+        outMax = max(outMax, qc);
+        outHasBounds = true;
+    }
+
+    if (sumW > 1e-5) {
+        return vec4(sumCol / sumW, sumDist / sumW);
+    }
+    if (bestFallW >= 0.0) {
+        outMin = fallbackCol;
+        outMax = fallbackCol;
+        outHasBounds = true;
+        return vec4(fallbackCol, fallbackDist);
+    }
+    return vec4(0.0, 0.0, 0.0, 64.0);
+}
+
+// Edge-stopping weight for lightweight 3x3 A-Trous (view-space plane test + fast perspective unprojection:
+// eliminates TWO full mat4 multiplies and transcendental pow() on every single tap!).
+float atrousWeight(vec3 centerViewPos, vec3 centerViewGeoN, vec3 centerGeoN, vec3 centerShadeN,
                    ivec2 q, bool isSpecular, float centerRough) {
     float qd = texelFetch(depthtex1, q, 0).r;
     if (qd >= 0.999999) return 0.0;
@@ -152,12 +267,27 @@ float atrousWeight(vec3 centerPos, vec3 centerGeoN, vec3 centerShadeN, float cen
     float geoDot = dot(centerGeoN, qGeoN);
     if (geoDot < 0.9) return 0.0;
 
-    vec2 qUv = (vec2(q) + 0.5) * texelSize();
-    vec3 qWorld = viewToWorld(screenToView(vec3(qUv, qd)));
-    float planeDist = abs(dot(qWorld - centerPos, centerGeoN));
+    vec2 qNdc = ((vec2(q) + 0.5) * texelSize()) * 2.0 - 1.0;
+    #ifdef TAA_ENABLED
+        qNdc -= taaJitter;
+    #endif
+    vec3 qView = fastScreenToViewNdc(qNdc, qd);
+    float planeDist = abs(dot(qView - centerViewPos, centerViewGeoN));
     float wPlane = exp(-planeDist * 14.0);
 
-    float wNorm = pow(max(dot(centerShadeN, qShadeN), 0.0), isSpecular ? 64.0 : 12.0);
+    float sDot = max(dot(centerShadeN, qShadeN), 0.0);
+    float s2 = sDot * sDot;
+    float s4 = s2 * s2;
+    float wNorm;
+    if (isSpecular) {
+        float s8  = s4 * s4;
+        float s16 = s8 * s8;
+        float s32 = s16 * s16;
+        wNorm = s32 * s32; // exact sDot^64 without exp2/log2!
+    } else {
+        wNorm = s4 * s4 * s4; // exact sDot^12
+    }
+
     float wRough = 1.0;
     if (isSpecular) {
         float qRough;
@@ -166,7 +296,11 @@ float atrousWeight(vec3 centerPos, vec3 centerGeoN, vec3 centerShadeN, float cen
         wRough = exp(-abs(centerRough - qRough) / max(0.02, 0.25 * max(centerRough, qRough)));
     }
 
-    return wPlane * wNorm * wRough * pow(geoDot, 32.0);
+    float g2  = geoDot * geoDot;
+    float g4  = g2 * g2;
+    float g8  = g4 * g4;
+    float g16 = g8 * g8;
+    return wPlane * wNorm * wRough * (g16 * g16);
 }
 
 #endif

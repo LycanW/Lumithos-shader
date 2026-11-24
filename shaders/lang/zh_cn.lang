@@ -1,5 +1,7 @@
 screen.PATH_TRACING=路径追踪
 screen.DEBUG=调试视图
+option.DIFFUSE_CHECKERBOARD=漫反射棋盘格半分辨率追踪
+option.SPECULAR_CHECKERBOARD=粗糙镜面棋盘格半分辨率追踪
 option.DIFFUSE_SSRT=漫反射屏幕空间拦截 (SSRT)
 option.SPECULAR_SSR=镜面屏幕空间反射 (SSR)
 option.PATH_GUIDING=L1 球谐路径引导 (vMF)

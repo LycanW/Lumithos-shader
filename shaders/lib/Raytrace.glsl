@@ -190,13 +190,14 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                                 throughput *= evalGlassTransmittance(tex.rgb * tintSrgb, tex.a);
                             } else {
                                 ivec2 spx = clamp(ivec2(atlasUV * vec2(specTexSize)), ivec2(0), specTexSize - 1);
-                                vec4 specTex = texelFetch(colortex15, spx, 0);
-                                float rough = 0.85, f0 = 0.04, pbrEmit = 0.0;
-                                decodeLabPBR(specTex, rough, f0, pbrEmit);
+                                float specA = texelFetch(colortex15, spx, 0).a;
+                                float pbrEmit = (specA > (0.5 / 255.0) && specA < (254.5 / 255.0)) ? specA : 0.0;
 
                                 vec3 albedoLin = srgbToLinear(tex.rgb * tintSrgb);
                                 float emitStr = 0.0;
-                                vec3 emitCol = evalEmitterColor(albedoLin, blockEmit, pbrEmit, emitStr);
+                                vec3 emitCol = (blockEmit > 0.0 || pbrEmit > 0.0)
+                                    ? evalEmitterColor(albedoLin, blockEmit, pbrEmit, emitStr)
+                                    : vec3(0.0);
 
                                 bestT = tCur;
                                 foundHit = true;
@@ -208,8 +209,6 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                                 result.normal = faceIndexToNormal(faceIdx);
                                 result.albedo = albedoLin;
                                 result.emitColor = emitCol;
-                                result.roughness = rough;
-                                result.f0 = f0;
                                 result.emission = emitStr;
                                 result.emitFluxScale = 1.0;
                                 result.skyLight = unpackSky(sv.tintAndSky);
@@ -218,25 +217,30 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                     }
                 }
 
-                // --- Track 2: Exact Non-Cube Primitives (Stairs, Slabs, Torches, Glass Panes, Mod Models) ---
+                // --- Track 2: Exact Non-Cube Primitives (Lazy 24B Geo Unpack + Post-Loop Shading) ---
                 uint primIdx = sv.primHead;
                 if (primIdx != PRIM_END) {
                     vec3 localOrig = vOrigin - vec3(vCoord);
                     bool hitTrans = false;
                     float bestTransT = bestT;
                     vec3 transFilter = vec3(1.0);
+                    bool foundT2 = false;
+                    vec3 bestE1 = vec3(0.0);
+                    vec3 bestE2 = vec3(0.0);
+                    vec2 bestHitUV = vec2(0.0);
+                    vec3 bestTexRgb = vec3(0.0);
+                    vec3 bestTintSrgb = vec3(1.0);
+                    float bestPrimEmit = 0.0;
                     #ifdef TRACE_HIGH_PRIM_GUARD
                         const int maxPrims = 256;
                     #else
                         const int maxPrims = 48;
                     #endif
                     for (int guard = 0; guard < maxPrims && primIdx != PRIM_END; ++guard) {
-                        vec3 p0, e1, e2, tintSrgb;
-                        vec2 uv0, uv1, uv2;
-                        float primEmit;
-                        bool primTrans;
+                        uint curIdx = primIdx;
+                        vec3 p0, e1, e2;
                         uint nextIdx;
-                        unpackScenePrim(primPool.prims[primIdx], p0, e1, e2, uv0, uv1, uv2, tintSrgb, primEmit, primTrans, nextIdx);
+                        unpackScenePrimGeo(curIdx, p0, e1, e2, nextIdx);
                         primIdx = nextIdx;
 
                         vec3 pvec = cross(safeDir, e2);
@@ -255,6 +259,13 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                         float t = dot(e2, qvec) * invDet;
                         if (t <= 1e-4 || t >= bestT) continue;
 
+                        // Defer UV/tint/material decode until ray actually intersects this triangle!
+                        vec2 uv0, uv1, uv2;
+                        vec3 tintSrgb;
+                        float primEmit;
+                        bool primTrans;
+                        unpackScenePrimShade(curIdx, uv0, uv1, uv2, tintSrgb, primEmit, primTrans);
+
                         vec2 hitUV = uv0 * (1.0 - u - v) + uv1 * u + uv2 * v;
                         vec4 tex = textureLod(colortex14, hitUV, atlasLod);
                         if (tex.a < 0.1) continue;
@@ -269,39 +280,44 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                             continue;
                         }
 
-                        vec3 rawCross = cross(e1, e2);
+                        bestT = t;
+                        foundT2 = true;
+                        bestE1 = e1;
+                        bestE2 = e2;
+                        bestHitUV = hitUV;
+                        bestTexRgb = tex.rgb;
+                        bestTintSrgb = tintSrgb;
+                        bestPrimEmit = primEmit;
+                    }
+                    if (foundT2) {
+                        vec3 rawCross = cross(bestE1, bestE2);
                         float triArea = 0.5 * length(rawCross);
                         vec3 triN = rawCross / max(2.0 * triArea, 1e-6);
                         if (dot(triN, safeDir) > 0.0) triN = -triN;
 
-                        ivec2 spx = clamp(ivec2(hitUV * vec2(specTexSize)), ivec2(0), specTexSize - 1);
-                        vec4 specTex = texelFetch(colortex15, spx, 0);
-                        float rough = 0.85, f0 = 0.04, pbrEmit = 0.0;
-                        decodeLabPBR(specTex, rough, f0, pbrEmit);
+                        ivec2 spx = clamp(ivec2(bestHitUV * vec2(specTexSize)), ivec2(0), specTexSize - 1);
+                        float specA = texelFetch(colortex15, spx, 0).a;
+                        float pbrEmit = (specA > (0.5 / 255.0) && specA < (254.5 / 255.0)) ? specA : 0.0;
 
-                        vec3 albedoLin = srgbToLinear(tex.rgb * tintSrgb);
+                        vec3 albedoLin = srgbToLinear(bestTexRgb * bestTintSrgb);
                         float emitStr = 0.0;
-                        vec3 emitCol = evalEmitterColor(albedoLin, primEmit, pbrEmit, emitStr);
+                        vec3 emitCol = (bestPrimEmit > 0.0 || pbrEmit > 0.0)
+                            ? evalEmitterColor(albedoLin, bestPrimEmit, pbrEmit, emitStr)
+                            : vec3(0.0);
 
-                        bestT = t;
                         foundHit = true;
                         result.hit = true;
                         result.fromTrack2 = true;
-                        result.isBlockEmit = (primEmit > 0.0);
-                        result.dist = t;
-                        result.worldPos = voxelToWorldPos(vOrigin + safeDir * t);
+                        result.isBlockEmit = (bestPrimEmit > 0.0);
+                        result.dist = bestT;
+                        result.worldPos = voxelToWorldPos(vOrigin + safeDir * bestT);
                         result.normal = triN;
                         result.albedo = albedoLin;
                         result.emitColor = emitCol;
-                        result.roughness = rough;
-                        result.f0 = f0;
                         result.emission = emitStr;
-                        // Small-emitter solid-angle flux compensation (torches, lanterns, candles, end rods):
-                        // Ramp smoothly from 1.0 at close range (t <= 0.55) to full compensation at distance (t >= 2.2)
-                        // so walls/probes right next to a lantern don't explode 20x into sharp 1x1 bright squares,
-                        // while distant 3-14 block illumination keeps full reach!
+                        // Small-emitter solid-angle flux compensation (torches, lanterns, candles, end rods)
                         float rawFluxScale = clamp(0.32 / max(triArea, 0.006), 1.0, 20.0);
-                        result.emitFluxScale = mix(1.0, rawFluxScale, smoothstep(0.55, 2.2, t));
+                        result.emitFluxScale = mix(1.0, rawFluxScale, smoothstep(0.55, 2.2, bestT));
                         result.skyLight = unpackSky(sv.tintAndSky);
                     }
                     if (hitTrans && bestTransT < bestT) {
@@ -445,12 +461,10 @@ vec3 traceVisibility(vec3 worldOrigin, vec3 targetVoxelPos, ivec3 targetVoxel, i
                 bool hitTrans = false;
                 vec3 transFilter = vec3(1.0);
                 for (int guard = 0; guard < 32 && primIdx != PRIM_END; ++guard) {
-                    vec3 p0, e1, e2, tintSrgb;
-                    vec2 uv0, uv1, uv2;
-                    float primEmit;
-                    bool primTrans;
+                    uint curIdx = primIdx;
+                    vec3 p0, e1, e2;
                     uint nextIdx;
-                    unpackScenePrim(primPool.prims[primIdx], p0, e1, e2, uv0, uv1, uv2, tintSrgb, primEmit, primTrans, nextIdx);
+                    unpackScenePrimGeo(curIdx, p0, e1, e2, nextIdx);
                     primIdx = nextIdx;
 
                     vec3 pvec = cross(safeDir, e2);
@@ -468,6 +482,12 @@ vec3 traceVisibility(vec3 worldOrigin, vec3 targetVoxelPos, ivec3 targetVoxel, i
 
                     float t = dot(e2, qvec) * invDet;
                     if (t <= 1e-4 || t >= tLimit) continue;
+
+                    vec2 uv0, uv1, uv2;
+                    vec3 tintSrgb;
+                    float primEmit;
+                    bool primTrans;
+                    unpackScenePrimShade(curIdx, uv0, uv1, uv2, tintSrgb, primEmit, primTrans);
 
                     vec2 hitUV = uv0 * (1.0 - u - v) + uv1 * u + uv2 * v;
                     vec4 tex = textureLod(colortex14, hitUV, 1.0);

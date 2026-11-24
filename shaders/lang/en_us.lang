@@ -1,5 +1,7 @@
 screen.PATH_TRACING=Path Tracing
 screen.DEBUG=Debug View
+option.DIFFUSE_CHECKERBOARD=Half-Res Diffuse Checkerboard
+option.SPECULAR_CHECKERBOARD=Half-Res Rough Specular Checkerboard
 option.DIFFUSE_SSRT=Diffuse SSRT Pre-Pass
 option.SPECULAR_SSR=Specular SSR Pre-Pass
 option.PATH_GUIDING=L1 SH Path Guiding (vMF)

@@ -42,7 +42,8 @@ void main() {
     readGBufferNormals(px, geoNormal, shadeNormal);
 
     vec4 rawTap = texelFetch(colortex4, px, 0);
-    vec3 raw = max(rawTap.rgb, vec3(0.0));
+    bool isTraced = (rawTap.a >= 0.0);
+    vec3 raw = isTraced ? max(rawTap.rgb, vec3(0.0)) : vec3(0.0);
     if (any(isnan(raw)) || any(isinf(raw))) raw = vec3(0.0);
 
     // Pure FLAT deterministic mirrors bypass temporal accumulation completely for zero ghosting,
@@ -60,13 +61,35 @@ void main() {
     vec3 worldPos = viewToWorld(viewPos);
     float expectedPrevDepth = -(gbufferPreviousModelView * vec4(worldPos + cameraVelocity, 1.0)).z;
 
-    float roughT = smoothstep(0.08, 0.35, roughness);
-    vec3 curr = despike3x3(colortex4, px, res, raw, geoNormal, shadeNormal, depth,
-                           mix(5.5, 2.8, roughT), mix(0.22, 0.04, roughT));
+    vec3 fillMin = vec3(0.0);
+    vec3 fillMax = vec3(0.0);
+    bool fillHasBounds = false;
+    vec4 filledTap = vec4(0.0, 0.0, 0.0, 64.0);
+    vec3 curr = vec3(0.0);
+    float hitDistForReproj = rawTap.a;
+
+    if (isTraced) {
+        float roughT = smoothstep(0.08, 0.35, roughness);
+        #ifdef SPECULAR_CHECKERBOARD
+            if (roughness >= 0.16) {
+                curr = despikeCheckerboard(colortex4, px, res, raw, geoNormal, shadeNormal, depth,
+                                           mix(5.5, 2.8, roughT), mix(0.22, 0.04, roughT));
+            } else {
+                curr = despike3x3(colortex4, px, res, raw, geoNormal, shadeNormal, depth,
+                                  mix(5.5, 2.8, roughT), mix(0.22, 0.04, roughT));
+            }
+        #else
+            curr = despike3x3(colortex4, px, res, raw, geoNormal, shadeNormal, depth,
+                              mix(5.5, 2.8, roughT), mix(0.22, 0.04, roughT));
+        #endif
+    } else {
+        filledTap = checkerboardCrossFill(colortex4, px, res, geoNormal, shadeNormal, depth, true, roughness, fillMin, fillMax, fillHasBounds);
+        hitDistForReproj = filledTap.a;
+    }
     float currLuma = luma(curr);
 
     vec3 viewDir = normalize(worldPos);
-    vec3 reprojPos = mix(worldPos + viewDir * min(rawTap.a, 64.0), worldPos, smoothstep(0.12, 0.35, roughness));
+    vec3 reprojPos = mix(worldPos + viewDir * min(hitDistForReproj, 64.0), worldPos, smoothstep(0.12, 0.35, roughness));
 
     vec3 oldSlow = vec3(0.0);
     vec2 oldMom  = vec2(0.0);
@@ -107,6 +130,35 @@ void main() {
         }
     }
 
+    float moveDecay = exp(-length(cameraVelocity) * (roughness < 0.20 ? 5.0 : 2.0));
+
+    if (!isTraced) {
+        if (support > 1e-4) {
+            oldSlow /= support;
+            oldAge  /= support;
+            oldMom  /= support;
+
+            float motionClampW = smoothstep(0.20, 1.75, speedPx);
+            if (motionClampW > 0.01 && fillHasBounds) {
+                vec3 margin = max((fillMax - fillMin) * 0.5, vec3(0.05));
+                vec3 clampedHist = clamp(oldSlow, max(fillMin - margin, vec3(0.0)), fillMax + margin);
+                oldSlow = mix(oldSlow, clampedHist, motionClampW);
+            }
+            oldAge *= moveDecay;
+            float stdDev = sqrt(max(oldMom.y - oldMom.x * oldMom.x, 0.0));
+            imageStore(specHistImg, px + currOff, roundHalf(vec4(oldSlow, oldAge)));
+            imageStore(specMomImg,  px + currOff, vec4(oldMom, 0.0, 0.0));
+            imageStore(scratchImg,  px,           roundHalf(vec4(oldSlow, stdDev)));
+        } else {
+            float fl = luma(filledTap.rgb);
+            float stdDev = max(0.25 * fl, 0.05);
+            imageStore(specHistImg, px + currOff, roundHalf(vec4(filledTap.rgb, 0.5)));
+            imageStore(specMomImg,  px + currOff, vec4(fl, fl * fl, 0.0, 0.0));
+            imageStore(scratchImg,  px,           roundHalf(vec4(filledTap.rgb, stdDev)));
+        }
+        return;
+    }
+
     if (support > 1e-4) {
         oldSlow /= support;
         oldAge  /= support;
@@ -120,7 +172,9 @@ void main() {
                 for (int x = -1; x <= 1; ++x) {
                     if (x == 0 && y == 0) continue;
                     ivec2 q = clamp(px + ivec2(x, y), ivec2(0), res - 1);
-                    vec3 s = max(texelFetch(colortex4, q, 0).rgb, vec3(0.0));
+                    vec4 sTap = texelFetch(colortex4, q, 0);
+                    if (sTap.a < 0.0) continue;
+                    vec3 s = max(sTap.rgb, vec3(0.0));
                     nMin = min(nMin, s);
                     nMax = max(nMax, s);
                 }
@@ -131,7 +185,6 @@ void main() {
         }
     }
 
-    float moveDecay = exp(-length(cameraVelocity) * (roughness < 0.20 ? 5.0 : 2.0));
     oldAge *= moveDecay;
 
     vec3 safeCurr = curr;

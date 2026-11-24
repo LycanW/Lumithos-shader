@@ -5,7 +5,17 @@
 #include "/lib/Raytrace.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
+#ifdef DIFFUSE_CHECKERBOARD
+    #if DEBUG_VIEW != 1
+        #define USE_DIFFUSE_CB
+    #endif
+#endif
+
+#ifdef USE_DIFFUSE_CB
+const vec2 workGroupsRender = vec2(0.5, 1.0);
+#else
 const vec2 workGroupsRender = vec2(1.0, 1.0);
+#endif
 
 layout(rgba16f) uniform image2D colorimg3;
 
@@ -13,8 +23,15 @@ void main() {
     uint lCount = lightList.lightCount;
     if (lCount == 0u || lCount > MAX_SCENE_LIGHTS) return;
 
-    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 tid = ivec2(gl_GlobalInvocationID.xy);
     ivec2 res = ivec2(screenSize());
+    #ifdef USE_DIFFUSE_CB
+        ivec2 px = ivec2(tid.x * 2 + ((tid.y ^ frameCounter) & 1), tid.y);
+        ivec2 bnPx = tid;
+    #else
+        ivec2 px = tid;
+        ivec2 bnPx = px;
+    #endif
     if (any(greaterThanEqual(px, res))) return;
 
     float depth = texelFetch(depthtex1, px, 0).r;
@@ -30,7 +47,7 @@ void main() {
     vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, geoNormal, toCam, camDist);
 
     vec3 neeDir = vec3(0.0, 1.0, 0.0);
-    vec3 neeRad = sampleDirectLightsNEE(rayOrig, shadeNormal, false, 8, stbn2D(px, frameCounter, 8u), neeDir);
+    vec3 neeRad = sampleDirectLightsNEE(rayOrig, shadeNormal, false, 8, stbn2D(bnPx, frameCounter, 8u), neeDir);
     if (any(isnan(neeRad)) || any(isinf(neeRad)) || maxOf(neeRad) <= 1e-5) return;
 
     vec4 prev = imageLoad(colorimg3, px);
