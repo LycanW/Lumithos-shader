@@ -1,6 +1,9 @@
 screen.PATH_TRACING=Path Tracing
 screen.DEBUG=Debug View
-option.DIFFUSE_CHECKERBOARD=Half-Res Diffuse Checkerboard
+option.DIFFUSE_TRACE_RES=Diffuse Tracing Resolution
+value.DIFFUSE_TRACE_RES.0=1/4 (2x2 Interleaved)
+value.DIFFUSE_TRACE_RES.1=1/2 (Checkerboard)
+value.DIFFUSE_TRACE_RES.2=1/1 (Full-Res)
 option.SPECULAR_CHECKERBOARD=Half-Res Rough Specular Checkerboard
 option.DIFFUSE_SSRT=Diffuse SSRT Pre-Pass
 option.SPECULAR_SSR=Specular SSR Pre-Pass

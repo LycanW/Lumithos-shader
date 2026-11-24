@@ -44,13 +44,18 @@ void main() {
     vec3 worldPos = viewToWorld(viewPos);
     float expectedPrevDepth = -(gbufferPreviousModelView * vec4(worldPos + cameraVelocity, 1.0)).z;
 
-    #ifdef DIFFUSE_CHECKERBOARD
-        #if DEBUG_VIEW != 1
-            #define USE_DIFFUSE_CB
-        #endif
+    #if DEBUG_VIEW == 1 || DIFFUSE_TRACE_RES == 2
+        #define DIFFUSE_MODE 2
+    #elif DIFFUSE_TRACE_RES == 1
+        #define DIFFUSE_MODE 1
+    #else
+        #define DIFFUSE_MODE 0
     #endif
 
-    #ifdef USE_DIFFUSE_CB
+    #if DIFFUSE_MODE == 0
+        ivec2 qOff = diffuseQuarterOffset(frameCounter);
+        bool isTraced = ((px & 1) == qOff);
+    #elif DIFFUSE_MODE == 1
         bool isTraced = (((px.x ^ px.y ^ frameCounter) & 1) == 0);
     #else
         bool isTraced = true;
@@ -115,9 +120,13 @@ void main() {
             imageStore(diffMomImg,  px + currMomOff,  vec4(oldMom, 0.0, 0.0));
             imageStore(scratchImg,  px,               roundHalf(vec4(oldSlow, max(oldAge, 1.0))));
         } else {
-            vec3 fMin, fMax;
-            bool fHas;
-            vec3 filled = checkerboardCrossFill(colortex3, px, res, geoNormal, shadeNormal, depth, false, 0.0, fMin, fMax, fHas).rgb;
+            #if DIFFUSE_MODE == 0
+                vec3 filled = quarterBilinearFill(colortex3, px, res, qOff, geoNormal, shadeNormal, depth);
+            #else
+                vec3 fMin, fMax;
+                bool fHas;
+                vec3 filled = checkerboardCrossFill(colortex3, px, res, geoNormal, shadeNormal, depth, false, 0.0, fMin, fMax, fHas).rgb;
+            #endif
             float fl = luma(filled);
             imageStore(diffHistImg, px + currSlowOff, roundHalf(vec4(filled, 0.5)));
             imageStore(diffHistImg, px + currFastOff, roundHalf(vec4(fl, fl, 0.5, 0.0)));
@@ -130,7 +139,9 @@ void main() {
     vec3 raw = max(texelFetch(colortex3, px, 0).rgb, vec3(0.0));
     if (any(isnan(raw)) || any(isinf(raw))) raw = vec3(0.0);
     // Preserve distant small-emitter hits while suppressing extreme multi-light fireflies.
-    #ifdef USE_DIFFUSE_CB
+    #if DIFFUSE_MODE == 0
+        vec3 curr = despikeQuarter(colortex3, px, res, raw, geoNormal, shadeNormal, depth, 6.0, 0.8);
+    #elif DIFFUSE_MODE == 1
         vec3 curr = despikeCheckerboard(colortex3, px, res, raw, geoNormal, shadeNormal, depth, 6.0, 0.8);
     #else
         vec3 curr = despike3x3(colortex3, px, res, raw, geoNormal, shadeNormal, depth, 6.0, 0.8);

@@ -207,6 +207,16 @@ void main() {
         return;
     }
 
+    // Cull sun-backfacing TERRAIN_SOLID triangles BEFORE EmitVertex() (~50% less GS vertex output!).
+    // Matches OpenGL's hardware GL_BACK culling identically while preserving full 360° voxelization above.
+    if (renderStage == MC_RENDER_STAGE_TERRAIN_SOLID) {
+        vec2 sc1 = vShadowClip[1].xy - vShadowClip[0].xy;
+        vec2 sc2 = vShadowClip[2].xy - vShadowClip[0].xy;
+        if (sc1.x * sc2.y - sc1.y * sc2.x <= 0.0) {
+            return;
+        }
+    }
+
     int needTex = (renderStage != MC_RENDER_STAGE_TERRAIN_SOLID) ? 1 : 0;
     for (int i = 0; i < 3; ++i) {
         gl_Position = vShadowClip[i];

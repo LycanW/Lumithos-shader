@@ -5,16 +5,15 @@
 #include "/lib/Raytrace.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
-#ifdef DIFFUSE_CHECKERBOARD
-    #if DEBUG_VIEW != 1
-        #define USE_DIFFUSE_CB
-    #endif
-#endif
-
-#ifdef USE_DIFFUSE_CB
-const vec2 workGroupsRender = vec2(0.5, 1.0);
+#if DEBUG_VIEW == 1 || DIFFUSE_TRACE_RES == 2
+    #define DIFFUSE_MODE 2
+    const vec2 workGroupsRender = vec2(1.0, 1.0);
+#elif DIFFUSE_TRACE_RES == 1
+    #define DIFFUSE_MODE 1
+    const vec2 workGroupsRender = vec2(0.5, 1.0);
 #else
-const vec2 workGroupsRender = vec2(1.0, 1.0);
+    #define DIFFUSE_MODE 0
+    const vec2 workGroupsRender = vec2(0.5, 0.5);
 #endif
 
 layout(rgba16f) uniform image2D colorimg3;
@@ -25,12 +24,20 @@ void main() {
 
     ivec2 tid = ivec2(gl_GlobalInvocationID.xy);
     ivec2 res = ivec2(screenSize());
-    #ifdef USE_DIFFUSE_CB
+    #if DIFFUSE_MODE == 0
+        int f4 = frameCounter & 3;
+        ivec2 qOff = ivec2(((f4 >> 1) ^ (f4 & 1)) & 1, f4 & 1);
+        ivec2 px = tid * 2 + qOff;
+        ivec2 bnPx = tid;
+        int bnSeq = (frameCounter >> 2) + f4 * 197;
+    #elif DIFFUSE_MODE == 1
         ivec2 px = ivec2(tid.x * 2 + ((tid.y ^ frameCounter) & 1), tid.y);
         ivec2 bnPx = tid;
+        int bnSeq = (frameCounter >> 1) + (frameCounter & 1) * 197;
     #else
         ivec2 px = tid;
         ivec2 bnPx = px;
+        int bnSeq = frameCounter;
     #endif
     if (any(greaterThanEqual(px, res))) return;
 
@@ -47,7 +54,7 @@ void main() {
     vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, geoNormal, toCam, camDist);
 
     vec3 neeDir = vec3(0.0, 1.0, 0.0);
-    vec3 neeRad = sampleDirectLightsNEE(rayOrig, shadeNormal, false, 8, stbn2D(bnPx, frameCounter, 8u), neeDir);
+    vec3 neeRad = sampleDirectLightsNEE(rayOrig, shadeNormal, false, 8, stbn2D(bnPx, bnSeq, 8u), neeDir);
     if (any(isnan(neeRad)) || any(isinf(neeRad)) || maxOf(neeRad) <= 1e-5) return;
 
     vec4 prev = imageLoad(colorimg3, px);

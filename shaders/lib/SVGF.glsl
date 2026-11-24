@@ -255,6 +255,96 @@ vec4 checkerboardCrossFill(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 geoN, v
     return vec4(0.0, 0.0, 0.0, 64.0);
 }
 
+// Bayer 2x2 subpixel offset for quarter-resolution interleaved diffuse tracing:
+// (0,0) -> (1,1) -> (1,0) -> (0,1) eliminates directional sweep waves across 4 frames!
+ivec2 diffuseQuarterOffset(int frame) {
+    int f = frame & 3;
+    return ivec2(((f >> 1) ^ (f & 1)) & 1, f & 1);
+}
+
+// Same-phase 8-neighbor (stride-2 3x3) RCRS firefly despike for 2x2 quarter-res traced buffers.
+vec3 despikeQuarter(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol, vec3 geoN, vec3 shadeN, float centerDepth, float ratio, float floorVal) {
+    float cLuma = luma(centerCol);
+    float maxN = 0.0;
+    float secondMax = 0.0;
+    int valid = 0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            if (x == 0 && y == 0) continue;
+            ivec2 q = px + ivec2(x, y) * 2;
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
+            float qd = texelFetch(depthtex1, q, 0).r;
+            if (qd >= 0.999999 || abs(qd - centerDepth) > 0.022 * max(centerDepth, 0.01)) continue;
+            vec3 qGeoN, qShadeN;
+            readGBufferNormals(q, qGeoN, qShadeN);
+            if (dot(geoN, qGeoN) < 0.9 || dot(shadeN, qShadeN) < 0.45) continue;
+            vec3 qc = max(texelFetch(noisyTex, q, 0).rgb, vec3(0.0));
+            if (any(isnan(qc)) || any(isinf(qc))) continue;
+            float ql = luma(qc);
+            if (ql > maxN) {
+                secondMax = maxN;
+                maxN = ql;
+            } else if (ql > secondMax) {
+                secondMax = ql;
+            }
+            ++valid;
+        }
+    }
+    if (valid >= 3) {
+        float refLuma = (valid >= 5) ? secondMax : maxN;
+        float lim = refLuma * ratio + floorVal;
+        if (cLuma > lim) {
+            return centerCol * (lim / max(cLuma, 1e-6));
+        }
+    }
+    return centerCol;
+}
+
+// Geometry-aware 2x2 bilinear fill from the 4 nearest traced quarter-res pixels around `px`.
+vec3 quarterBilinearFill(sampler2D noisyTex, ivec2 px, ivec2 res, ivec2 qOff, vec3 geoN, vec3 shadeN, float centerDepth) {
+    ivec2 qBase = ((px - qOff) >> 1) * 2 + qOff;
+    vec2 f = vec2(px - qBase) * 0.5;
+
+    vec3 sumCol = vec3(0.0);
+    float sumW = 0.0;
+    vec3 fallbackCol = vec3(0.0);
+    float bestFallW = -1.0;
+
+    for (int j = 0; j < 2; ++j) {
+        for (int i = 0; i < 2; ++i) {
+            ivec2 q = qBase + ivec2(i * 2, j * 2);
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
+            float qd = texelFetch(depthtex1, q, 0).r;
+            if (qd >= 0.999999) continue;
+
+            vec3 qc = max(texelFetch(noisyTex, q, 0).rgb, vec3(0.0));
+            if (any(isnan(qc)) || any(isinf(qc))) continue;
+
+            vec3 qGeoN, qShadeN;
+            readGBufferNormals(q, qGeoN, qShadeN);
+            float bw = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
+            float dGeo = dot(geoN, qGeoN);
+            float depthDiff = abs(qd - centerDepth) / max(centerDepth, 0.01);
+            float fallW = (max(dGeo, 0.0) + 0.05) * (bw + 0.05) / (1.0 + depthDiff * 40.0);
+            if (fallW > bestFallW) {
+                bestFallW = fallW;
+                fallbackCol = qc;
+            }
+
+            if (dGeo < 0.90 || depthDiff > 0.03) continue;
+            float dShade = max(dot(shadeN, qShadeN), 0.0);
+            if (dShade < 0.45) continue;
+
+            float s2 = dShade * dShade;
+            float w = max(bw, 0.05) * (s2 * s2);
+            sumCol += w * qc;
+            sumW   += w;
+        }
+    }
+    if (sumW > 1e-5) return sumCol / sumW;
+    return (bestFallW >= 0.0) ? fallbackCol : vec3(0.0);
+}
+
 // Edge-stopping weight for lightweight 3x3 A-Trous (view-space plane test + fast perspective unprojection:
 // eliminates TWO full mat4 multiplies and transcendental pow() on every single tap!).
 float atrousWeight(vec3 centerViewPos, vec3 centerViewGeoN, vec3 centerGeoN, vec3 centerShadeN,

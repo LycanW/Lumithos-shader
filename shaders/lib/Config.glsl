@@ -24,9 +24,10 @@
 #define RC_WORKLIST_CAP    8192u
 
 // ---- Feature Toggles ----
-#define DIFFUSE_CHECKERBOARD
+// Diffuse tracing resolution: 0 = 1/4 (2x2 Bayer), 1 = 1/2 (Checkerboard), 2 = 1/1 (Full-Res)
+#define DIFFUSE_TRACE_RES 0 // [0 1 2]
 #define SPECULAR_CHECKERBOARD
-#define DIFFUSE_SSRT
+//#define DIFFUSE_SSRT
 #define SPECULAR_SSR
 #define PATH_GUIDING
 #define SPECULAR_REFLECTIONS

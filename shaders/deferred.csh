@@ -1,23 +1,24 @@
 #version 430 compatibility
 
-// Pass: Pure Indirect Diffuse GI (1 SPP + L1 SH vMF Path Guiding + 8-step SSRT + Hybrid 64-Way Trace)
+// Pass: Pure Indirect Diffuse GI (1 SPP + L1 SH vMF Path Guiding + Hybrid 64-Way Trace)
 // Direct block-light NEE runs in dedicated lightweight deferred1.csh to eliminate GRF register spilling!
 #include "/lib/Raytrace.glsl"
 #include "/lib/SkyShadow.glsl"
-#include "/lib/ScreenTrace.glsl"
+#ifdef DIFFUSE_SSRT
+    #include "/lib/ScreenTrace.glsl"
+#endif
 #include "/lib/RadianceCache.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
-#ifdef DIFFUSE_CHECKERBOARD
-    #if DEBUG_VIEW != 1
-        #define USE_DIFFUSE_CB
-    #endif
-#endif
-
-#ifdef USE_DIFFUSE_CB
-const vec2 workGroupsRender = vec2(0.5, 1.0);
+#if DEBUG_VIEW == 1 || DIFFUSE_TRACE_RES == 2
+    #define DIFFUSE_MODE 2
+    const vec2 workGroupsRender = vec2(1.0, 1.0);
+#elif DIFFUSE_TRACE_RES == 1
+    #define DIFFUSE_MODE 1
+    const vec2 workGroupsRender = vec2(0.5, 1.0);
 #else
-const vec2 workGroupsRender = vec2(1.0, 1.0);
+    #define DIFFUSE_MODE 0
+    const vec2 workGroupsRender = vec2(0.5, 0.5);
 #endif
 
 layout(rgba16f) uniform writeonly image2D colorimg3;
@@ -25,12 +26,20 @@ layout(rgba16f) uniform writeonly image2D colorimg3;
 void main() {
     ivec2 tid = ivec2(gl_GlobalInvocationID.xy);
     ivec2 res = ivec2(screenSize());
-    #ifdef USE_DIFFUSE_CB
+    #if DIFFUSE_MODE == 0
+        int f4 = frameCounter & 3;
+        ivec2 qOff = ivec2(((f4 >> 1) ^ (f4 & 1)) & 1, f4 & 1);
+        ivec2 px = tid * 2 + qOff;
+        ivec2 bnPx = tid;
+        int bnSeq = (frameCounter >> 2) + f4 * 197;
+    #elif DIFFUSE_MODE == 1
         ivec2 px = ivec2(tid.x * 2 + ((tid.y ^ frameCounter) & 1), tid.y);
         ivec2 bnPx = tid;
+        int bnSeq = (frameCounter >> 1) + (frameCounter & 1) * 197;
     #else
         ivec2 px = tid;
         ivec2 bnPx = px;
+        int bnSeq = frameCounter;
     #endif
     if (any(greaterThanEqual(px, res))) return;
 
@@ -54,7 +63,11 @@ void main() {
     vec3 guideDir = shadeNormal;
     float guideKappa = 0.0;
     float guideProb = 0.0;
-    #ifdef USE_DIFFUSE_CB
+    #if DIFFUSE_MODE == 0
+        bool allowAlloc = !isHand
+                       && (((tid.x ^ frameCounter) & 1) == 0)
+                       && (((tid.y ^ (frameCounter >> 1)) & 1) == 0);
+    #elif DIFFUSE_MODE == 1
         bool allowAlloc = !isHand
                        && (((tid.x ^ frameCounter) & 3) == 0)
                        && (((tid.y ^ (frameCounter >> 2)) & 1) == 0);
@@ -63,11 +76,11 @@ void main() {
                        && (((px.x ^ frameCounter) & 3) == 0)
                        && (((px.y ^ (frameCounter >> 2)) & 3) == 0);
     #endif
-    bool useGuide = !isHand && queryRCPathGuide(worldPos, geoNormal, allowAlloc, stbn2D(bnPx, frameCounter, 3u), guideDir, guideKappa, guideProb);
+    bool useGuide = !isHand && queryRCPathGuide(worldPos, geoNormal, allowAlloc, stbn2D(bnPx, bnSeq, 3u), guideDir, guideKappa, guideProb);
 
-    vec2 uDir = stbn2D(bnPx, frameCounter, 0u);
+    vec2 uDir = stbn2D(bnPx, bnSeq, 0u);
     vec3 rayDir;
-    if (useGuide && stbn2D(bnPx, frameCounter, 4u).x < guideProb) {
+    if (useGuide && stbn2D(bnPx, bnSeq, 4u).x < guideProb) {
         rayDir = sampleVMF(guideDir, guideKappa, uDir);
     } else {
         rayDir = sampleCosineHemisphere(shadeNormal, uDir);
@@ -93,7 +106,7 @@ void main() {
         if (!isHand && frameCounter > 1) {
             vec2 prevHitUV;
             float ssDist;
-            if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * geoNormal) * 0.04, rayDir, 8, 0.18, stbn2D(bnPx, frameCounter, 9u).x, 0.25, prevHitUV, ssDist)) {
+            if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * geoNormal) * 0.04, rayDir, 8, 0.18, stbn2D(bnPx, bnSeq, 9u).x, 0.25, prevHitUV, ssDist)) {
                 ivec2 hpx = clamp(ivec2(prevHitUV * screenSize()), ivec2(0), res - 1);
                 vec4 prevTap = texelFetch(colortex5, hpx, 0);
                 // Keep DIFFUSE_SSRT active on 99.9% of surfaces; only skip emissive pixels when NEE is active!
@@ -124,7 +137,7 @@ void main() {
                 radiance += hit.albedo * INV_PI * getDirectLightColor() * (NdotL * vis);
             }
 
-            vec3 bounce = queryRadianceCacheStochastic(hit.worldPos, hit.normal, 0u, stbn2D(bnPx, frameCounter, 5u));
+            vec3 bounce = queryRadianceCacheStochastic(hit.worldPos, hit.normal, 0u, stbn2D(bnPx, bnSeq, 5u));
             radiance += hit.albedo * bounce * 0.85;
             radiance *= hit.throughput;
         } else if (hit.exitedGrid) {
