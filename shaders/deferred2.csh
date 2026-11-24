@@ -21,15 +21,14 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
     readGBufferNormals(px, geoNormal, shadeNormal);
 
     vec2 uv = (vec2(px) + 0.5) * texelSize();
-    vec3 viewPos = screenToView(vec3(uv, depth));
-    // Pure mirrors trace along unjittered pixel centers so thin 1px cutout geometry (ladders, fences,
-    // iron bars) never shimmers or blinks across alpha gaps when TAA jitter oscillates!
-    if (roughness < 0.08) {
-        vec4 vpRaw = gbufferProjectionInverse * vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
-        viewPos = vpRaw.xyz / vpRaw.w;
-    }
-    vec3 worldPos = viewToWorld(viewPos);
-    vec3 viewDir  = normalize(-worldPos); // toward camera in world space
+    // Always unjitter with screenToView() to match depthtex1's TAA-jittered rasterization,
+    // and compute viewDir from the actual view-bobbed camera eye (gbufferModelViewInverse[3].xyz),
+    // never un-bobbed vec3(0.0), so mirror reflections stay 100% optically stationary while walking!
+    vec3 viewPos   = screenToView(vec3(uv, depth));
+    vec3 worldPos  = viewToWorld(viewPos);
+    vec3 eyeToSurf = mat3(gbufferModelViewInverse) * viewPos;
+    float camDist  = length(eyeToSurf);
+    vec3 viewDir   = -eyeToSurf / max(camDist, 1e-4); // toward actual bobbed camera eye in world space
 
     vec3 rayDir;
     if (roughness < 0.08) {
@@ -65,7 +64,6 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
     #endif
 
     if (!ssrHit) {
-        float camDist = length(worldPos);
         vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, geoNormal, viewDir, camDist);
         // Full-res atlas LOD 0 for razor-sharp mirror reflections of 6-face & rotated block textures!
         float specLod = roughness < 0.25 ? 0.0 : 1.0;

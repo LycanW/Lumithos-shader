@@ -4,7 +4,7 @@
 #include "/lib/Resources.glsl"
 
 // ============================================================================
-// Revoxelation-Style O(1) 3-Cascade Toroidal 3D Clipmap Radiance Cache
+// O(1) 3-Cascade Toroidal 3D Clipmap Radiance Cache
 // - ZERO hash probing loops, ZERO collisions, ZERO tombstones, ZERO duplicates!
 // - 16-byte aligned probe (1x 128-bit load) storing full-sphere L1 SH + normalized CoCg + frames.
 // - 1-bit atomicOr deduplicated active-set worklist updates ONLY visible/reflected cells.

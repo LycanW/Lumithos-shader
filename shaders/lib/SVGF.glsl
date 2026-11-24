@@ -42,14 +42,16 @@ vec3 karisInverse(vec3 c) {
 // Filter-independent 12-tap cornerless Catmull-Rom bicubic history fetch via texelFetch:
 // - 1-tap exact fast-path when static (zero overhead).
 // - Tile-clamped (`tileOff`) for race-free ping-pong TAA history without cross-tile bleed!
-vec3 fetchHistoryFast(sampler2D tex, vec2 uv, ivec2 res, ivec2 tileOff) {
+// - Returns RGB (Catmull-Rom) + A (non-ringing bilinear accumulated frame count).
+vec4 fetchHistoryFast4(sampler2D tex, vec2 uv, ivec2 res, ivec2 tileOff) {
     vec2 pos = uv * vec2(res) - 0.5;
     ivec2 base = ivec2(floor(pos));
     vec2 f = pos - vec2(base);
 
     if (abs(f.x) < 1e-4 && abs(f.y) < 1e-4) {
         ivec2 p = clamp(base, ivec2(0), res - 1) + tileOff;
-        return max(texelFetch(tex, p, 0).rgb, vec3(0.0));
+        vec4 tap = texelFetch(tex, p, 0);
+        return vec4(max(tap.rgb, vec3(0.0)), max(tap.a, 0.0));
     }
 
     vec2 f2 = f * f;
@@ -69,26 +71,32 @@ vec3 fetchHistoryFast(sampler2D tex, vec2 uv, ivec2 res, ivec2 tileOff) {
     int y2 = clamp(base.y + 1, 0, maxPx.y) + tileOff.y;
     int y3 = clamp(base.y + 2, 0, maxPx.y) + tileOff.y;
 
-    // 12-tap cornerless Catmull-Rom (drops the 4 <0.004-weight outer corners, renormalized exactly).
+    // 12-tap cornerless Catmull-Rom for RGB + exact bilinear of center 2x2 for frame count A.
+    vec4 t11 = texelFetch(tex, ivec2(x1, y1), 0);
+    vec4 t21 = texelFetch(tex, ivec2(x2, y1), 0);
+    vec4 t12 = texelFetch(tex, ivec2(x1, y2), 0);
+    vec4 t22 = texelFetch(tex, ivec2(x2, y2), 0);
+
     vec3 sum = vec3(0.0);
     sum += max(texelFetch(tex, ivec2(x1, y0), 0).rgb, vec3(0.0)) * (w1.x * w0.y);
     sum += max(texelFetch(tex, ivec2(x2, y0), 0).rgb, vec3(0.0)) * (w2.x * w0.y);
 
     sum += max(texelFetch(tex, ivec2(x0, y1), 0).rgb, vec3(0.0)) * (w0.x * w1.y);
-    sum += max(texelFetch(tex, ivec2(x1, y1), 0).rgb, vec3(0.0)) * (w1.x * w1.y);
-    sum += max(texelFetch(tex, ivec2(x2, y1), 0).rgb, vec3(0.0)) * (w2.x * w1.y);
+    sum += max(t11.rgb, vec3(0.0)) * (w1.x * w1.y);
+    sum += max(t21.rgb, vec3(0.0)) * (w2.x * w1.y);
     sum += max(texelFetch(tex, ivec2(x3, y1), 0).rgb, vec3(0.0)) * (w3.x * w1.y);
 
     sum += max(texelFetch(tex, ivec2(x0, y2), 0).rgb, vec3(0.0)) * (w0.x * w2.y);
-    sum += max(texelFetch(tex, ivec2(x1, y2), 0).rgb, vec3(0.0)) * (w1.x * w2.y);
-    sum += max(texelFetch(tex, ivec2(x2, y2), 0).rgb, vec3(0.0)) * (w2.x * w2.y);
+    sum += max(t12.rgb, vec3(0.0)) * (w1.x * w2.y);
+    sum += max(t22.rgb, vec3(0.0)) * (w2.x * w2.y);
     sum += max(texelFetch(tex, ivec2(x3, y2), 0).rgb, vec3(0.0)) * (w3.x * w2.y);
 
     sum += max(texelFetch(tex, ivec2(x1, y3), 0).rgb, vec3(0.0)) * (w1.x * w3.y);
     sum += max(texelFetch(tex, ivec2(x2, y3), 0).rgb, vec3(0.0)) * (w2.x * w3.y);
 
     float wNorm = 1.0 - (w0.x + w3.x) * (w0.y + w3.y);
-    return max(sum / max(wNorm, 1e-4), vec3(0.0));
+    float aBilin = mix(mix(t11.a, t21.a, f.x), mix(t12.a, t22.a, f.x), f.y);
+    return vec4(max(sum / max(wNorm, 1e-4), vec3(0.0)), max(aBilin, 0.0));
 }
 
 // YCoCg AABB ray-clipping (Karis / Salvi): pulls out-of-gamut history straight toward AABB center

@@ -23,7 +23,7 @@ void main() {
     float depth = texelFetch(depthtex1, px, 0).r;
 
     if (depth >= 0.999999) {
-        vec3 skyDir = normalize(viewToWorld(screenToView(vec3(uv, 1.0))));
+        vec3 skyDir = normalize(mat3(gbufferModelViewInverse) * screenToView(vec3(uv, 1.0)));
         vec3 sky = evalSky(skyDir, true);
         imageStore(colorimg0, px, vec4(sky, 1.0));
         imageStore(colorimg5, px, vec4(sky, 1.0));
@@ -34,7 +34,7 @@ void main() {
     GBufferMat mat = readGBuffer(px);
     vec3 viewPos  = screenToView(vec3(uv, depth));
     vec3 worldPos = viewToWorld(viewPos);
-    vec3 viewDir  = normalize(-worldPos);
+    vec3 viewDir  = normalize(mat3(gbufferModelViewInverse) * (-viewPos));
 
     // Publish exact float32 integer-encoded 16-bit normals (never denormal uintBitsToFloat!).
     imageStore(prevGuideImg, px, vec4(

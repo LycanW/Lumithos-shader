@@ -120,8 +120,9 @@ void main() {
     #endif
 
     if (!ssrtHit) {
-        float camDist = length(worldPos);
-        vec3 toCam = -worldPos / max(camDist, 1e-4);
+        vec3 eyeToSurf = mat3(gbufferModelViewInverse) * viewPos;
+        float camDist = length(eyeToSurf);
+        vec3 toCam = -eyeToSurf / max(camDist, 1e-4);
         vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, geoNormal, toCam, camDist);
         TraceHit hit = traceScene(rayOrig, rayDir, DIFFUSE_MAX_STEPS, 1.0, true);
         if (hit.hit) {

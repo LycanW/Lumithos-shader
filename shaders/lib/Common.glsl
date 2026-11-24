@@ -185,13 +185,16 @@ vec3 octDecode(vec2 e) {
     return normalize(n);
 }
 
+// Use EVEN quantization scale 254.0 (0..254) so exact center 0.5 maps to integer 127.0 instead of 127.5!
+// With odd 255.0, all 6 axis-aligned Minecraft faces (±X, ±Y, ±Z) land dead-center on the 127.5 rounding
+// cliff, causing ±1e-7 camera-matrix float noise to snap flat mirror normals by ±0.45° (±10px mirror jump!).
 uint packNormal16(vec3 n) {
-    uvec2 q = uvec2(round(saturate(octEncode(n)) * 255.0));
+    uvec2 q = uvec2(round(saturate(octEncode(n)) * 254.0));
     return q.x | (q.y << 8u);
 }
 
 vec3 unpackNormal16(uint word) {
-    return octDecode(vec2(word & 255u, (word >> 8u) & 255u) * (1.0 / 255.0));
+    return octDecode(vec2(word & 255u, (word >> 8u) & 255u) * (1.0 / 254.0));
 }
 
 // ---- YCoCg Color Transform ----

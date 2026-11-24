@@ -48,9 +48,11 @@ void main() {
     readGBufferNormals(px, geoNormal, shadeNormal);
 
     vec2 uv = (vec2(px) + 0.5) * texelSize();
-    vec3 worldPos = viewToWorld(screenToView(vec3(uv, depth)));
-    float camDist = length(worldPos);
-    vec3 toCam = -worldPos / max(camDist, 1e-4);
+    vec3 viewPos = screenToView(vec3(uv, depth));
+    vec3 worldPos = viewToWorld(viewPos);
+    vec3 eyeToSurf = mat3(gbufferModelViewInverse) * viewPos;
+    float camDist = length(eyeToSurf);
+    vec3 toCam = -eyeToSurf / max(camDist, 1e-4);
     vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, geoNormal, toCam, camDist);
 
     vec3 neeDir = vec3(0.0, 1.0, 0.0);

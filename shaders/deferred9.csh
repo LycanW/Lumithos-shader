@@ -88,7 +88,7 @@ void main() {
     }
     float currLuma = luma(curr);
 
-    vec3 viewDir = normalize(worldPos);
+    vec3 viewDir = normalize(mat3(gbufferModelViewInverse) * viewPos);
     vec3 reprojPos = mix(worldPos + viewDir * min(hitDistForReproj, 64.0), worldPos, smoothstep(0.12, 0.35, roughness));
 
     vec3 oldSlow = vec3(0.0);

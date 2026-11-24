@@ -119,8 +119,9 @@ vec3 sampleShadowPCF(vec3 worldPos, vec3 normal, float blueNoise01) {
     float NdotL = dot(normal, lightDir);
     if (NdotL <= 0.0) return vec3(0.0);
 
-    float dist = length(worldPos);
-    vec3 toCam = -worldPos / max(dist, 1e-4);
+    vec3 eyeToSurf = worldPos - gbufferModelViewInverse[3].xyz;
+    float dist = length(eyeToSurf);
+    vec3 toCam = -eyeToSurf / max(dist, 1e-4);
     vec3 sp = worldToShadowScreenBiased(worldPos, normal, toCam, 1.65, 0.018, 0.30);
     if (any(lessThan(sp, vec3(0.0))) || any(greaterThan(sp, vec3(1.0)))) return vec3(1.0);
 

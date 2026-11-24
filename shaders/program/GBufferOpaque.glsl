@@ -64,6 +64,16 @@
         vec3 albedoSrgb = tex.rgb * vColor;
         vec3 geoNormal = normalize(vGeoNormal);
         if (!gl_FrontFacing) geoNormal = -geoNormal;
+        // Snap strictly axis-aligned block faces to exact canonical axes to eliminate
+        // camera-rotation floating-point noise from (gbufferModelViewInverse * gl_NormalMatrix).
+        vec3 absGeoN = abs(geoNormal);
+        if (maxOf(absGeoN) > 0.9999) {
+            geoNormal = (absGeoN.x >= absGeoN.y && absGeoN.x >= absGeoN.z)
+                ? vec3(geoNormal.x >= 0.0 ? 1.0 : -1.0, 0.0, 0.0)
+                : ((absGeoN.y >= absGeoN.z)
+                    ? vec3(0.0, geoNormal.y >= 0.0 ? 1.0 : -1.0, 0.0)
+                    : vec3(0.0, 0.0, geoNormal.z >= 0.0 ? 1.0 : -1.0));
+        }
 
         vec3 shadeNormal = geoNormal;
         #if defined(MC_NORMAL_MAP) && !defined(STAGE_BASIC)
@@ -84,6 +94,9 @@
             ivec2 sRes = max(textureSize(specular, 0), ivec2(1));
             ivec2 sPx  = clamp(ivec2(fract(vTexCoord) * vec2(sRes)), ivec2(0), sRes - 1);
             vec4 specTex = texelFetch(specular, sPx, 0);
+            // Mipmap-filter continuous smoothness (R) to eliminate grazing-angle roughness/specular
+            // flickering, while keeping discrete LabPBR metal F0 codes (G) and emission (A) exact!
+            specTex.r = texture(specular, vTexCoord).r;
             decodeLabPBR(specTex, roughness, f0, pbrEmit);
         #endif
         float maxAlb = maxOf(srgbToLinear(albedoSrgb));
