@@ -16,7 +16,7 @@ const vec2 workGroupsRender = vec2(1.0, 1.0);
 
 layout(rgba16f) uniform writeonly image2D colorimg4;
 
-vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roughness) {
+vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roughness, float f0Raw) {
     vec3 geoNormal, shadeNormal;
     readGBufferNormals(px, geoNormal, shadeNormal);
 
@@ -30,15 +30,32 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
     float camDist  = length(eyeToSurf);
     vec3 viewDir   = -eyeToSurf / max(camDist, 1e-4); // toward actual bobbed camera eye in world space
 
+    vec3 H = shadeNormal;
     vec3 rayDir;
     if (roughness < 0.08) {
         rayDir = reflect(-viewDir, shadeNormal);
     } else {
-        rayDir = sampleGGXVNDF(viewDir, shadeNormal, roughness, stbn2D(bnPx, frameCounter, 2u));
+        rayDir = sampleGGXVNDF(viewDir, shadeNormal, roughness, stbn2D(bnPx, frameCounter, 2u), H);
     }
 
-    if (dot(rayDir, geoNormal) <= 0.0) {
-        rayDir = reflect(-viewDir, geoNormal);
+    // Physical Heitz VNDF microfacet horizon test: rays reflected below the surface are self-occluded
+    // (weight = 0), NEVER replaced with a fake mirror reflection!
+    float NdotV = max(dot(shadeNormal, viewDir), 1e-4);
+    float NdotL = dot(shadeNormal, rayDir);
+    if (dot(rayDir, geoNormal) <= 1e-4 || NdotL <= 1e-4) {
+        return vec4(0.0, 0.0, 0.0, 0.0);
+    }
+
+    vec3 brdfRatio = vec3(1.0);
+    if (roughness >= 0.08) {
+        float alpha = max(roughness * roughness, 0.002);
+        float VdotH = saturate(dot(viewDir, H));
+        float g2OverG1 = smithGGX_G2OverG1(NdotV, NdotL, alpha);
+        vec3 albedoLin = (f0Raw >= (237.5 / 255.0)) ? srgbToLinear(unpackUnorm4x8(texelFetch(colortex1, px, 0).r).rgb) : vec3(0.0);
+        vec3 F0_rgb = evalLabPBRF0(f0Raw, albedoLin);
+        vec3 F_vh = fresnelSchlick(F0_rgb, VdotH);
+        vec3 envBrdf = evalEnvBRDF(F0_rgb, NdotV, roughness);
+        brdfRatio = clamp((F_vh * g2OverG1) / max(envBrdf, vec3(1e-3)), vec3(0.0), vec3(4.0));
     }
 
     vec3 radiance = vec3(0.0);
@@ -74,10 +91,10 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
             radiance += hit.emitColor * (hit.emission * EMISSIVE_SCALE);
 
             vec3 lightDir = getShadowLightDir();
-            float NdotL = max(dot(hit.normal, lightDir), 0.0);
-            if (NdotL > 0.0) {
+            float hitNdotL = max(dot(hit.normal, lightDir), 0.0);
+            if (hitNdotL > 0.0) {
                 vec3 vis = sampleShadowFastRay(hit.worldPos, hit.normal, rayDir);
-                radiance += hit.albedo * INV_PI * getDirectLightColor() * (NdotL * vis);
+                radiance += hit.albedo * INV_PI * getDirectLightColor() * (hitNdotL * vis);
             }
 
             vec3 skyAmb = evalSky(hit.normal, false) * (0.15 + 0.85 * hit.skyLight);
@@ -93,6 +110,7 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
         }
     }
 
+    radiance *= brdfRatio;
     float specClamp = (roughness < 0.12) ? 32.0 : 12.0;
     radiance = min(max(radiance, vec3(0.0)), vec3(specClamp));
     if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
@@ -111,8 +129,8 @@ void main() {
         ivec2 pxB = ivec2(tid.x * 2 + (parity ^ 1), tid.y);
 
         #ifndef SPECULAR_REFLECTIONS
-            if (pxA.x < res.x) imageStore(colorimg4, pxA, vec4(0.0));
-            if (pxB.x < res.x) imageStore(colorimg4, pxB, vec4(0.0));
+            if (pxA.x < res.x) imageStore(colorimg4, pxA, vec4(0.0, 0.0, 0.0, -1.0));
+            if (pxB.x < res.x) imageStore(colorimg4, pxB, vec4(0.0, 0.0, 0.0, -1.0));
             return;
         #endif
 
@@ -126,15 +144,15 @@ void main() {
 
             float depth = texelFetch(depthtex1, px, 0).r;
             if (depth >= 0.999999) {
-                imageStore(colorimg4, px, vec4(0.0));
+                imageStore(colorimg4, px, vec4(0.0, 0.0, 0.0, -1.0));
                 continue;
             }
 
-            float roughness;
+            float roughness, f0Raw;
             bool isHand;
-            readGBufferRoughHand(px, roughness, isHand);
-            if (isHand || roughness > SPECULAR_ROUGH_CUTOFF) {
-                imageStore(colorimg4, px, vec4(0.0));
+            readGBufferSpecMask(px, roughness, f0Raw, isHand);
+            if (!hasSpecularTrace(roughness, f0Raw, isHand)) {
+                imageStore(colorimg4, px, vec4(0.0, 0.0, 0.0, -1.0));
                 continue;
             }
 
@@ -144,31 +162,31 @@ void main() {
             }
 
             ivec2 bnPx = (slot == 0) ? tid : px;
-            imageStore(colorimg4, px, traceSpecularPixel(px, bnPx, res, depth, roughness));
+            imageStore(colorimg4, px, traceSpecularPixel(px, bnPx, res, depth, roughness, f0Raw));
         }
     #else
         ivec2 px = tid;
         if (any(greaterThanEqual(px, res))) return;
 
         #ifndef SPECULAR_REFLECTIONS
-            imageStore(colorimg4, px, vec4(0.0));
+            imageStore(colorimg4, px, vec4(0.0, 0.0, 0.0, -1.0));
             return;
         #endif
 
         float depth = texelFetch(depthtex1, px, 0).r;
         if (depth >= 0.999999) {
-            imageStore(colorimg4, px, vec4(0.0));
+            imageStore(colorimg4, px, vec4(0.0, 0.0, 0.0, -1.0));
             return;
         }
 
-        float roughness;
+        float roughness, f0Raw;
         bool isHand;
-        readGBufferRoughHand(px, roughness, isHand);
-        if (roughness > SPECULAR_ROUGH_CUTOFF || isHand) {
-            imageStore(colorimg4, px, vec4(0.0));
+        readGBufferSpecMask(px, roughness, f0Raw, isHand);
+        if (!hasSpecularTrace(roughness, f0Raw, isHand)) {
+            imageStore(colorimg4, px, vec4(0.0, 0.0, 0.0, -1.0));
             return;
         }
 
-        imageStore(colorimg4, px, traceSpecularPixel(px, px, res, depth, roughness));
+        imageStore(colorimg4, px, traceSpecularPixel(px, px, res, depth, roughness, f0Raw));
     #endif
 }

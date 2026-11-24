@@ -11,12 +11,8 @@ const vec2 workGroupsRender = vec2(1.0, 1.0);
     layout(rgba16f) uniform writeonly image2D scratchImg;
 #endif
 
-#if ATROUS_PASS == 0
-    #ifdef ATROUS_SPECULAR
-        layout(rgba16f) uniform image2D specHistImg;
-    #else
-        layout(rgba16f) uniform image2D diffHistImg;
-    #endif
+#if ATROUS_PASS == 0 && !defined(ATROUS_SPECULAR)
+    layout(rgba16f) uniform image2D diffHistImg;
 #endif
 
 void main() {
@@ -36,12 +32,12 @@ void main() {
         return;
     }
 
-    float rough;
+    float rough, f0Raw;
     bool isHand;
-    readGBufferRoughHand(px, rough, isHand);
+    readGBufferSpecMask(px, rough, f0Raw, isHand);
     #ifdef ATROUS_SPECULAR
         bool isSpec = true;
-        if (rough > SPECULAR_ROUGH_CUTOFF || isHand) {
+        if (!hasSpecularTrace(rough, f0Raw, isHand)) {
             #ifdef ATROUS_WRITE_COLORTEX4
                 imageStore(colorimg4, px, vec4(0.0));
             #else
@@ -59,8 +55,8 @@ void main() {
     ivec2 srcOff = ivec2(ATROUS_SRC_TILE * res.x, 0);
     vec4 center = texelFetch(scratchTex, px + srcOff, 0);
 
-    // Pure flat & near-mirror specular bypass spatial blur completely (skip 9-tap variance & unprojection!).
-    if (isSpec && rough <= 0.14) {
+    // Pure deterministic mirrors (< 0.08, matching deferred2.csh) bypass spatial blur completely!
+    if (isSpec && rough < 0.08) {
         #ifdef ATROUS_WRITE_COLORTEX4
             imageStore(colorimg4, px, roundHalf(center));
         #else
@@ -88,6 +84,18 @@ void main() {
         stdDev = sqrt(max(varSum / max(varW, 1e-6), 1e-10));
     #endif
 
+    // Disocclusion-only output A-Trous stride expansion for rough specular (zero extra passes/taps):
+    // Any pixel with valid temporal history (age >= 1.5, including fast camera motion) strictly keeps
+    // standard stride (1, 2); only freshly disoccluded birth-frame pixels (age = 0.5..1.0) widen their
+    // output-only spatial footprint so they match adjacent converged coplanar roughness with zero ghosting!
+    int stride = 1 << ATROUS_PASS;
+    #ifdef ATROUS_SPECULAR
+        ivec2 specHistPx = px + ivec2((frameCounter & 1) * res.x, 0);
+        float specAge = texelFetch(specHistTex, specHistPx, 0).a;
+        float disoccT = smoothstep(1.6, 0.5, specAge) * smoothstep(0.08, 0.30, rough);
+        stride *= (1 + int(round(disoccT * 2.0)));
+    #endif
+
     float phiLuma = isSpec
         ? max(4.5 * stdDev, 0.008)
         : max(6.5 * stdDev, 0.015 * max(centerLuma, 0.20));
@@ -98,7 +106,6 @@ void main() {
     vec3 centerView = fastScreenToViewNdc(centerNdc, depth);
     vec3 centerViewGeoN = normalize(mat3(gbufferModelView) * geoNormal);
 
-    int stride = 1 << ATROUS_PASS;
     const float k[2] = float[2](1.0, 0.5);
 
     vec3 sumCol = center.rgb;
@@ -126,26 +133,16 @@ void main() {
 
     vec4 outVal = vec4(sumCol / sumW, sqrt(max(sumVar, 0.0)) / sumW);
 
-    // Disocclusion-only FeedbackTap = 0 on pass 0:
-    // Stops spatial feedback once age >= 8 so steady-state temporal mean NEVER diffuses
-    // white noise into slowly crawling 20px cloudy blotches!
-    #if ATROUS_PASS == 0
+    // Disocclusion-only FeedbackTap = 0 on pass 0 for Diffuse GI only:
+    // Specular history stays 100% pure temporal (zero spatial write-back -> mathematically zero recursive smear!).
+    #if ATROUS_PASS == 0 && !defined(ATROUS_SPECULAR)
         int currSide = frameCounter & 1;
-        #ifdef ATROUS_SPECULAR
-            ivec2 hPx = px + ivec2(currSide * res.x, 0);
-            float age = imageLoad(specHistImg, hPx).a;
-            float fb = smoothstep(0.25, 0.55, rough) * smoothstep(8.0, 1.0, age) * 0.30;
-            if (fb > 0.01) {
-                imageStore(specHistImg, hPx, roundHalf(vec4(mix(center.rgb, outVal.rgb, fb), age)));
-            }
-        #else
-            ivec2 hPx = px + ivec2((currSide * 2) * res.x, 0);
-            float age = imageLoad(diffHistImg, hPx).a;
-            float fb = smoothstep(8.0, 1.0, age) * 0.40;
-            if (fb > 0.01) {
-                imageStore(diffHistImg, hPx, roundHalf(vec4(mix(center.rgb, outVal.rgb, fb), age)));
-            }
-        #endif
+        ivec2 hPx = px + ivec2((currSide * 2) * res.x, 0);
+        float age = imageLoad(diffHistImg, hPx).a;
+        float fb = smoothstep(8.0, 1.0, age) * 0.40;
+        if (fb > 0.01) {
+            imageStore(diffHistImg, hPx, roundHalf(vec4(mix(center.rgb, outVal.rgb, fb), age)));
+        }
     #endif
 
     #ifdef ATROUS_WRITE_COLORTEX3

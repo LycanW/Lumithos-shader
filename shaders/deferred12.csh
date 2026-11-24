@@ -53,31 +53,40 @@ void main() {
         : vec3(0.0);
     vec3 directDiffuse = mat.albedo * INV_PI * directCol * (NdotL * shadowVis);
 
-    // Direct Specular Highlight (GGX with LabPBR RGB F0 & physical NDF cap)
+    // Direct Specular Highlight (Cook-Torrance GGX with Height-Correlated Smith Visibility & LabPBR RGB F0)
     vec3 F0_rgb = evalLabPBRF0(mat.f0, mat.albedo);
     bool isMetal = isLabPBRMetal(mat.f0);
+    float NdotV = max(dot(mat.shadeNormal, viewDir), 1e-4);
     vec3 directSpec = vec3(0.0);
+    vec3 kD_direct = isMetal ? vec3(0.0) : (1.0 - evalEnvBRDF(F0_rgb, NdotV, mat.roughness));
     if (NdotL > 0.0 && maxOf(shadowVis) > 0.0) {
         vec3 H = normalize(lightDir + viewDir);
         float NdotH = max(dot(mat.shadeNormal, H), 0.0);
+        float VdotH = saturate(dot(viewDir, H));
         float alpha = max(mat.roughness * mat.roughness, 0.015);
         float a2 = alpha * alpha;
         float dDenom = NdotH * NdotH * (a2 - 1.0) + 1.0;
-        float D = min(a2 / max(PI * dDenom * dDenom, 1e-5), 128.0);
-        vec3 F = fresnelSchlick(F0_rgb, max(dot(H, viewDir), 0.0));
-        directSpec = F * D * 0.25 * directCol * (NdotL * shadowVis);
+        float D = min(a2 / max(PI * dDenom * dDenom, 1e-5), 256.0);
+        float Vis = visSmithGGX(NdotV, NdotL, alpha);
+        vec3 F = fresnelSchlick(F0_rgb, VdotH);
+        directSpec = F * (D * Vis) * directCol * (NdotL * shadowVis);
+        if (!isMetal) kD_direct = 1.0 - F;
     }
 
     vec3 diffuseGI  = max(texelFetch(colortex3, px, 0).rgb, vec3(0.0));
     vec3 specularGI = max(texelFetch(colortex4, px, 0).rgb, vec3(0.0));
     vec3 emissive   = (mat.emission > 0.0) ? (evalDirectEmitterColor(mat.albedo) * (mat.emission * EMISSIVE_SCALE)) : vec3(0.0);
 
-    vec3 F_env = fresnelSchlick(F0_rgb, max(dot(mat.shadeNormal, viewDir), 0.0));
-    float specMask = (mat.roughness <= SPECULAR_ROUGH_CUTOFF && !mat.isHand) ? 1.0 : 0.0;
-    vec3 kD = isMetal ? vec3(0.0) : (1.0 - F_env * specMask);
+    // Physical GGX split-sum environment BRDF remodulation + energy conservation:
+    // - Metals use traced GGX specular across the entire [0..1] roughness range (never black!).
+    // - Dielectrics smoothly cross-fade from traced GGX to diffuseGI across [0.50..0.65] (zero cutoff cliff!).
+    vec3 envBrdf = evalEnvBRDF(F0_rgb, NdotV, mat.roughness);
+    vec3 kD_env  = isMetal ? vec3(0.0) : (1.0 - envBrdf);
+    float specTraceFade = isMetal ? 1.0 : smoothstep(SPECULAR_ROUGH_CUTOFF, 0.50, mat.roughness);
+    vec3 specEnv = mat.isHand ? diffuseGI : mix(diffuseGI, specularGI, specTraceFade);
 
-    vec3 diffuseLit = directDiffuse * kD + (diffuseGI * mat.albedo) * kD + emissive;
-    vec3 finalLit   = diffuseLit + directSpec + specularGI * F_env * specMask;
+    vec3 diffuseLit = directDiffuse * kD_direct + (diffuseGI * mat.albedo) * kD_env + emissive;
+    vec3 finalLit   = diffuseLit + directSpec + specEnv * envBrdf;
 
     // Store pure diffuse+emissive radiance in colortex5.rgb, and emission flag in .a so
     // DIFFUSE_SSRT can stay enabled alongside NEE without double-counting block lamps!

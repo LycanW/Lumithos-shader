@@ -282,6 +282,13 @@ void readGBufferRoughHand(ivec2 pixel, out float roughness, out bool isHand) {
     isHand    = ((w1 >> 24u) & 1u) != 0u;
 }
 
+void readGBufferSpecMask(ivec2 pixel, out float roughness, out float f0, out bool isHand) {
+    uint w1 = texelFetch(colortex1, pixel, 0).g;
+    roughness = float(w1 & 255u) * (1.0 / 255.0);
+    f0        = float((w1 >> 8u) & 255u) * (1.0 / 255.0);
+    isHand    = ((w1 >> 24u) & 1u) != 0u;
+}
+
 // ---- LabPBR 1.3 Specular Decode ----
 // Stores perceptual roughness (1 - smoothness) so GGX squares it ONCE (alpha = r^2),
 // and preserves raw f0 byte (0..255) so hardcoded/albedo-tinted metals keep full RGB F0.
@@ -295,10 +302,16 @@ bool isLabPBRMetal(float f0Raw) {
     return f0Raw >= (229.5 / 255.0);
 }
 
+// Metals always trace specular across the full roughness range [0..1] (since kD = 0);
+// dielectrics trace up to SPECULAR_ROUGH_CUTOFF and blend smoothly into diffuseGI above 0.50.
+bool hasSpecularTrace(float roughness, float f0Raw, bool isHand) {
+    return !isHand && (roughness <= SPECULAR_ROUGH_CUTOFF || isLabPBRMetal(f0Raw));
+}
+
 vec3 evalLabPBRF0(float f0Raw, vec3 albedoLinear) {
     int code = int(round(saturate(f0Raw) * 255.0));
     if (code < 230) {
-        return vec3(max(f0Raw, 0.04));
+        return vec3(max(f0Raw, 0.02));
     }
     if (code == 230) return vec3(0.562, 0.565, 0.578); // Iron
     if (code == 231) return vec3(1.000, 0.766, 0.336); // Gold

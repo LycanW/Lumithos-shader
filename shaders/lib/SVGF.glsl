@@ -10,6 +10,17 @@ uniform sampler2D specMomTex;
 uniform sampler2D prevGuideTex;
 uniform sampler2D scratchTex;
 
+// Exact previous-frame R2 TAA jitter matching shaders.properties (for jitter-aligned prevGuideTex lookups).
+vec2 getPrevTaaJitter() {
+    #ifdef TAA_ENABLED
+        float pf = float(max(frameCounter - 1, 0));
+        vec2 r2 = fract(pf * vec2(1.0 / 1.3247179572, 1.0 / 1.7548776662) + 0.5) * 2.0 - 1.0;
+        return r2 * texelSize();
+    #else
+        return vec2(0.0);
+    #endif
+}
+
 // Reproject current world position to previous unjittered screen UV.
 vec2 reprojectWorldToPrevUV(vec3 worldPos) {
     vec3 prevWorld = worldPos + cameraVelocity;
@@ -239,10 +250,10 @@ vec4 checkerboardCrossFill(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 geoN, v
 
         float w = pow(dShade, 4.0);
         if (checkRough) {
-            float qRough;
+            float qRough, qF0;
             bool qHand;
-            readGBufferRoughHand(q, qRough, qHand);
-            if (qHand || qRough > SPECULAR_ROUGH_CUTOFF) continue;
+            readGBufferSpecMask(q, qRough, qF0, qHand);
+            if (!hasSpecularTrace(qRough, qF0, qHand)) continue;
             w *= exp(-abs(centerRough - qRough) / max(0.03, 0.25 * max(centerRough, qRough)));
         }
         sumCol  += w * qc;
@@ -426,9 +437,10 @@ float atrousWeight(vec3 centerViewPos, vec3 centerViewGeoN, vec3 centerGeoN, vec
 
     float wRough = 1.0;
     if (isSpecular) {
-        float qRough;
+        float qRough, qF0;
         bool qHand;
-        readGBufferRoughHand(q, qRough, qHand);
+        readGBufferSpecMask(q, qRough, qF0, qHand);
+        if (!hasSpecularTrace(qRough, qF0, qHand)) return 0.0;
         wRough = exp(-abs(centerRough - qRough) / max(0.02, 0.25 * max(centerRough, qRough)));
     }
 

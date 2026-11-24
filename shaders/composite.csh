@@ -111,21 +111,34 @@ void main() {
     vec3 result = curr;
     float outFrames = 1.0;
 
-    // Geometry-guided disocclusion check using prevGuideTex:
+    // Geometry-guided disocclusion check using jitter-aligned prevGuideTex:
     // - Mirror interior: reject if previous pixel was outside this mirror plane (prevents sky bleed across mirror edges).
-    // - Solid surface interior (bestPx == px): reject on abrupt depth/normal change (kills block place/break ghosting!).
+    // - Solid surface interior (bestPx == px): check 2x2 around jitter-aligned prevGuideUV so thin iron bars
+    //   never falsely reset from subpixel jitter while placed/broken blocks still reset immediately!
     if (validMotion && centerDepth < 0.999999 && all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThan(prevUV, vec2(1.0)))) {
-        ivec2 pGuidePx = clamp(ivec2(prevUV * vec2(res)), ivec2(0), res - 1);
-        vec4 pg = texelFetch(prevGuideTex, pGuidePx, 0);
+        vec2 alignedPrevUV = prevUV + 0.5 * (getPrevTaaJitter() - taaJitter);
         if (isMirrorInterior) {
+            ivec2 pGuidePx = clamp(ivec2(alignedPrevUV * vec2(res)), ivec2(0), res - 1);
+            vec4 pg = texelFetch(prevGuideTex, pGuidePx, 0);
             if (pg.w <= 0.0 || pg.z >= 0.08 || dot(centerGeoN, unpackNormal16(uint(round(pg.x)))) < 0.96) {
                 validMotion = false;
             }
         } else if (bestPx == px) {
             float expectedPrevDepth = -(gbufferPreviousModelView * vec4(centerWorld + cameraVelocity, 1.0)).z;
-            if (pg.w <= 0.0
-                || abs(expectedPrevDepth - pg.w) > max(0.25, 0.15 * max(expectedPrevDepth, 0.1))
-                || dot(centerGeoN, unpackNormal16(uint(round(pg.x)))) < 0.80) {
+            float depthTol = max(0.25, 0.15 * max(expectedPrevDepth, 0.1));
+            ivec2 gBase = ivec2(floor(alignedPrevUV * vec2(res) - 0.5));
+            bool foundMatch = false;
+            for (int j = 0; j < 4; ++j) {
+                ivec2 gp = clamp(gBase + ivec2(j & 1, j >> 1), ivec2(0), res - 1);
+                vec4 pg = texelFetch(prevGuideTex, gp, 0);
+                if (pg.w > 0.0
+                    && abs(expectedPrevDepth - pg.w) <= depthTol
+                    && dot(centerGeoN, unpackNormal16(uint(round(pg.x)))) >= 0.80) {
+                    foundMatch = true;
+                    break;
+                }
+            }
+            if (!foundMatch) {
                 validMotion = false;
             }
         }

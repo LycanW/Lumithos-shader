@@ -232,8 +232,8 @@ float pdfVMF(vec3 w, vec3 mu, float kappa) {
     return (kappa / max(denom, 1e-6)) * exp(kappa * (dot(w, mu) - 1.0));
 }
 
-// ---- GGX Specular VNDF Sampling (Heitz 2018) ----
-vec3 sampleGGXVNDF(vec3 viewDir, vec3 normal, float roughness, vec2 u) {
+// ---- GGX Specular VNDF Sampling (Heitz 2018) & Physical Smith GGX BRDF ----
+vec3 sampleGGXVNDF(vec3 viewDir, vec3 normal, float roughness, vec2 u, out vec3 outH) {
     float alpha = max(roughness * roughness, 0.002);
     mat3 tbn = buildTBN(normal);
     vec3 Ve = transpose(tbn) * viewDir;
@@ -249,8 +249,39 @@ vec3 sampleGGXVNDF(vec3 viewDir, vec3 normal, float roughness, vec2 u) {
     t2 = (1.0 - s) * sqrt(max(0.0, 1.0 - t1 * t1)) + s * t2;
     vec3 Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
     vec3 Ne = normalize(vec3(alpha * Nh.x, alpha * Nh.y, max(0.0, Nh.z)));
-    vec3 H = tbn * Ne;
-    return reflect(-viewDir, H);
+    outH = tbn * Ne;
+    return reflect(-viewDir, outH);
+}
+
+// Height-correlated Smith GGX visibility: G2(V, L) / (4 * NdotV * NdotL)
+float visSmithGGX(float NdotV, float NdotL, float alpha) {
+    float a2 = alpha * alpha;
+    float vTerm = NdotL * sqrt(NdotV * NdotV * (1.0 - a2) + a2);
+    float lTerm = NdotV * sqrt(NdotL * NdotL * (1.0 - a2) + a2);
+    return 0.5 / max(vTerm + lTerm, 1e-5);
+}
+
+// Exact Heitz 2018 VNDF estimator geometric weight: G2(V, L) / G1(V)
+float smithGGX_G2OverG1(float NdotV, float NdotL, float alpha) {
+    float a2 = alpha * alpha;
+    float vTerm = NdotL * sqrt(NdotV * NdotV * (1.0 - a2) + a2);
+    float lTerm = NdotV * sqrt(NdotL * NdotL * (1.0 - a2) + a2);
+    return saturate((NdotV * NdotL + vTerm) / max(vTerm + lTerm, 1e-5));
+}
+
+// Analytical GGX split-sum DFG LUT (Lazarov 2013 / Karis):
+// Used for unbiased SVGF specular demodulation/remodulation and diffuse energy conservation.
+vec2 envBRDFScaleBias(float NdotV, float roughness) {
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572,  0.022);
+    const vec4 c1 = vec4( 1.0,  0.0425,  1.040, -0.040);
+    vec4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+    return clamp(vec2(-1.04, 1.04) * a004 + r.zw, vec2(0.0), vec2(1.0));
+}
+
+vec3 evalEnvBRDF(vec3 F0, float NdotV, float roughness) {
+    vec2 ab = envBRDFScaleBias(NdotV, roughness);
+    return F0 * ab.x + vec3(ab.y);
 }
 
 vec3 fresnelSchlick(vec3 F0, float cosTheta) {

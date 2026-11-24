@@ -101,6 +101,38 @@ void main() {
                 oldMom  += w * hm;
                 support += w;
             }
+
+            // Thin-geometry (1-3px iron bars / chains / latticework) 3x3 jitter-aligned fallback:
+            // Only executes when 2x2 bilinear misses completely (zero overhead on normal surfaces).
+            if (support <= 1e-4) {
+                vec2 alignedPos = (prevUV + 0.5 * (getPrevTaaJitter() - taaJitter)) * vec2(res) - 0.5;
+                ivec2 centerPx = ivec2(round(alignedPos));
+                float bestDistSq = 1e9;
+                for (int y = -1; y <= 1; ++y) {
+                    for (int x = -1; x <= 1; ++x) {
+                        ivec2 tap = centerPx + ivec2(x, y);
+                        if (any(lessThan(tap, ivec2(0))) || any(greaterThanEqual(tap, res))) continue;
+                        vec4 pg = texelFetch(prevGuideTex, tap, 0);
+                        float pDepth = pg.w;
+                        if (pDepth <= 0.0) continue;
+                        vec3 pGeoN   = unpackNormal16(uint(round(pg.x)));
+                        vec3 pShadeN = unpackNormal16(uint(round(pg.y)));
+                        if (dot(geoNormal, pGeoN) < 0.90 || dot(shadeNormal, pShadeN) < 0.45) continue;
+                        if (abs(expectedPrevDepth - pDepth) > max(0.08, 0.05 * max(expectedPrevDepth, 0.1))) continue;
+                        vec2 d = vec2(tap) - alignedPos;
+                        float d2 = dot(d, d);
+                        if (d2 < bestDistSq) {
+                            bestDistSq = d2;
+                            vec4 hs = texelFetch(diffHistTex, tap + prevSlowOff, 0);
+                            oldSlow = hs.rgb;
+                            oldAge  = hs.a;
+                            oldFast = texelFetch(diffHistTex, tap + prevFastOff, 0);
+                            oldMom  = texelFetch(diffMomTex,  tap + prevMomOff,  0).rg;
+                            support = 1.0;
+                        }
+                    }
+                }
+            }
         }
     }
 
