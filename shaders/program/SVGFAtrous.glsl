@@ -98,9 +98,7 @@ void main() {
     vec3 centerView = fastScreenToViewNdc(centerNdc, depth);
     vec3 centerViewGeoN = normalize(mat3(gbufferModelView) * geoNormal);
 
-    int stride = isSpec
-        ? max(1, int(round(float(1 << ATROUS_PASS) * (1.0 + 4.0 * rough))))
-        : (1 << ATROUS_PASS);
+    int stride = 1 << ATROUS_PASS;
     const float k[2] = float[2](1.0, 0.5);
 
     vec3 sumCol = center.rgb;
