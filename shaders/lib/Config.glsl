@@ -45,6 +45,9 @@
 #define WATER_PARALLAX
 #define WATER_CAUSTICS
 #define WAVE_STRENGTH 1.0 // [0.25 0.5 0.75 1.0 1.25 1.5 2.0]
+#define AERIAL_PERSPECTIVE
+#define FOG_DENSITY 1.0 // [0.25 0.5 0.75 1.0 1.5 2.0]
+#define STAR_INTENSITY 1.0 // [0.0 0.5 1.0 1.5 2.0]
 #define DEBUG_VIEW 0 // [0 1 2 3 4 5 6]
 
 // ---- Lighting & Tracing Tuning ----

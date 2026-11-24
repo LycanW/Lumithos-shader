@@ -261,6 +261,15 @@ void main() {
     L += albedo * (emission * EMISSIVE_SCALE);
     L = max(L, vec3(0.0));
     T = clamp(T, vec3(0.0), vec3(1.0));
+
+    // Exact algebraically non-double-fogging Aerial Perspective for distant oceans & translucents:
+    // since opaque background `bg` already carries T_ap + L_ap, writing L' = L*T_ap + L_ap*(1 - T)
+    // yields bg_fogged * T + L' == (bg * T + L) * T_ap + L_ap identically!
+    if (!viewFromInside && isEyeInWater == 0) {
+        vec3 apTrans, apInscatter;
+        evalAerialPerspective(vWorldPos, -V, vSkyLight, apTrans, apInscatter);
+        L = L * apTrans + apInscatter * (1.0 - T);
+    }
     if (any(isnan(L)) || any(isinf(L))) L = vec3(0.0);
 
     radianceOut = vec4(L, saturate(1.0 - luma(T)));

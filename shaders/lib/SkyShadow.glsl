@@ -2,60 +2,7 @@
 #define LIB_SKY_SHADOW_GLSL
 
 #include "/lib/Resources.glsl"
-
-// Clean procedural day/sunset/night sky for MVP (no volumetric clouds/fog yet).
-vec3 evalSky(vec3 dir, bool includeDisc) {
-    vec3 sunDir = getSunDir();
-    float sunElev = sunDir.y;
-    float dayFactor = smoothstep(-0.12, 0.18, sunElev);
-    float sDist = (sunElev - 0.02) * 8.0;
-    float sunsetFactor = exp(-(sDist * sDist));
-
-    float up = saturate(dir.y);
-    float horizon = pow(1.0 - up, 4.0);
-
-    vec3 dayZenith   = vec3(0.14, 0.36, 0.85);
-    vec3 dayHorizon  = vec3(0.55, 0.74, 0.96);
-    vec3 sunsetHoriz = vec3(1.15, 0.42, 0.16);
-    vec3 nightZenith = vec3(0.004, 0.007, 0.018);
-    vec3 nightHoriz  = vec3(0.012, 0.018, 0.036);
-
-    vec3 zenith  = mix(nightZenith, dayZenith, dayFactor);
-    vec3 horiz   = mix(nightHoriz, dayHorizon, dayFactor);
-    horiz = mix(horiz, sunsetHoriz, sunsetFactor * 0.65);
-
-    vec3 sky = mix(zenith, horiz, horizon);
-    sky *= mix(1.0, 0.45, rainStrength);
-
-    if (includeDisc) {
-        float sunCos = dot(dir, sunDir);
-        float sunDisc = smoothstep(0.9993, 0.9997, sunCos) * dayFactor * (1.0 - rainStrength);
-        float sunGlow = pow(max(sunCos, 0.0), 32.0) * (0.25 * dayFactor + 0.5 * sunsetFactor) * (1.0 - rainStrength);
-        sky += vec3(12.0, 10.5, 8.5) * sunDisc + vec3(1.0, 0.65, 0.35) * sunGlow;
-
-        vec3 moonDir = -sunDir;
-        float moonCos = dot(dir, moonDir);
-        float moonDisc = smoothstep(0.9995, 0.9998, moonCos) * (1.0 - dayFactor) * (1.0 - rainStrength);
-        sky += vec3(1.2, 1.3, 1.6) * moonDisc;
-    }
-
-    return sky;
-}
-
-vec3 getDirectLightColor() {
-    vec3 sunDir = getSunDir();
-    float sunElev = sunDir.y;
-    float dayFactor = smoothstep(-0.08, 0.12, sunElev);
-    float sDist = (sunElev - 0.02) * 8.0;
-    float sunsetFactor = exp(-(sDist * sDist));
-
-    vec3 sunCol = mix(vec3(1.0, 0.95, 0.88), vec3(1.0, 0.48, 0.22), sunsetFactor * 0.75) * 4.2;
-    vec3 moonCol = vec3(0.18, 0.24, 0.38) * 0.16;
-
-    float fade = smoothstep(0.0, 0.08, abs(sunElev));
-    vec3 lightCol = isNight() ? moonCol : sunCol;
-    return lightCol * fade * (1.0 - 0.8 * rainStrength);
-}
+#include "/lib/Atmosphere.glsl"
 
 // Single-transform shadow-screen helper: computes undistorted clip once to derive exact
 // local distorted texel size, sin(theta)-exact normal offset (clears single-texel staircase

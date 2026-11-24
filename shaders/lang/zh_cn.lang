@@ -1,4 +1,5 @@
 screen.PATH_TRACING=路径追踪
+screen.ATMOSPHERE=物理大气与天空
 screen.WATER=水体光学
 screen.POST_PROCESSING=色彩管理与后处理
 screen.DEBUG=调试视图
@@ -24,6 +25,9 @@ option.BLOOM_STRENGTH=辉光强度
 option.WATER_PARALLAX=三维水波视差 (Wave Parallax)
 option.WATER_CAUSTICS=水底色散焦散 (Caustics)
 option.WAVE_STRENGTH=波浪强度
+option.AERIAL_PERSPECTIVE=大气空中透视 (远景雾)
+option.FOG_DENSITY=大气雾浓度
+option.STAR_INTENSITY=星空亮度
 option.DEBUG_VIEW=调试视图
 value.DEBUG_VIEW.0=关闭
 value.DEBUG_VIEW.1=原始漫反射 GI

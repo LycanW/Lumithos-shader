@@ -400,9 +400,16 @@ void main() {
     vec3 diffuseLit = directDiffuse * kD_direct + sssLight * kD_direct + heldDiffuse + (diffuseGI * mat.albedo) * (kD_env * mat.ao) + emissive;
     vec3 finalLit   = diffuseLit + directSpec + heldSpec + specEnv * envBrdf * specOcc;
 
-    // Store pure diffuse+emissive radiance in colortex5.rgb, and emission flag in .a so
-    // DIFFUSE_SSRT can stay enabled alongside NEE without double-counting block lamps!
+    // Store pure local diffuse+emissive radiance in colortex5.rgb (before aerial perspective!)
+    // so SSRT/SSR history never double-accumulates atmospheric haze.
     imageStore(colorimg5, px, vec4(diffuseLit, mat.emission));
+
+    // Physical Aerial Perspective (distant Rayleigh+Mie haze & seamless horizon dissolve).
+    if (!mat.isHand && isEyeInWater == 0) {
+        vec3 apTrans, apInscatter;
+        evalAerialPerspective(worldPos, -viewDir, mat.skyLight, apTrans, apInscatter);
+        finalLit = finalLit * apTrans + apInscatter;
+    }
 
     // Optional Debug Visualizations
     #if DEBUG_VIEW == 1 || DEBUG_VIEW == 2

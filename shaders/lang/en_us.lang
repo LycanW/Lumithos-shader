@@ -1,4 +1,5 @@
 screen.PATH_TRACING=Path Tracing
+screen.ATMOSPHERE=Sky & Atmosphere
 screen.WATER=Water Optics
 screen.POST_PROCESSING=Color & Post-Processing
 screen.DEBUG=Debug View
@@ -24,6 +25,9 @@ option.BLOOM_STRENGTH=Bloom Strength
 option.WATER_PARALLAX=3D Wave Parallax
 option.WATER_CAUSTICS=Chromatic Underwater Caustics
 option.WAVE_STRENGTH=Wave Strength
+option.AERIAL_PERSPECTIVE=Aerial Perspective (Distant Haze)
+option.FOG_DENSITY=Atmospheric Haze Density
+option.STAR_INTENSITY=Starfield Brightness
 option.DEBUG_VIEW=Debug View
 value.DEBUG_VIEW.0=Off
 value.DEBUG_VIEW.1=Raw Diffuse GI

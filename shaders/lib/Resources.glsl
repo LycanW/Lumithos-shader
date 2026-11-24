@@ -78,6 +78,25 @@ uniform sampler2D  colortex15; // blocks_s specular atlas
     uniform usampler3D superOccTex;
 #endif
 
+// ---- Physical Atmosphere LUTs (Hillaire 2020: Transmittance, Multi-Scattering, Sky-View) ----
+#ifdef STAGE_ATMO_TRANS_WRITE
+    layout(rgba16f) uniform writeonly image2D atmoTransImg;
+#else
+    uniform sampler2D atmoTransTex;
+#endif
+
+#ifdef STAGE_ATMO_MULTI_WRITE
+    layout(rgba16f) uniform writeonly image2D atmoMultiImg;
+#else
+    uniform sampler2D atmoMultiTex;
+#endif
+
+#ifdef STAGE_ATMO_SKY_WRITE
+    layout(rgba16f) uniform writeonly image2D atmoSkyImg;
+#else
+    uniform sampler2D atmoSkyTex;
+#endif
+
 // ---- Track 1: Direct-Addressed 6-Face Full-Cube Surface Pool (32 bytes/voxel, ZERO spinlocks!) ----
 struct SurfaceVoxel {
     uint face[6];    // +X, -X, +Y, -Y, +Z, -Z
