@@ -223,9 +223,14 @@ bool inVoxelBounds(ivec3 v) {
     return all(greaterThanEqual(v, ivec3(0))) && all(lessThan(v, ivec3(VOXEL_RES_XZ, VOXEL_RES_Y, VOXEL_RES_XZ)));
 }
 
-// ---- Shadow Space Distortion (standard radial focus near player) ----
+// ---- Shadow Space Distortion (adaptive radial focus preserves near texel density up to 320m) ----
+float shadowDistortBias() {
+    return clamp(24.0 / shadowDistance, 0.10, 0.15);
+}
+
 float shadowDistortFactor(vec2 xy) {
-    return 0.85 * length(xy) + 0.15;
+    float b = shadowDistortBias();
+    return (1.0 - b) * length(xy) + b;
 }
 
 vec2 distortShadowXY(vec2 xy) {

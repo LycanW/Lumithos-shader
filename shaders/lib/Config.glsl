@@ -64,8 +64,9 @@
 #define SPECULAR_ROUGH_CUTOFF 0.65
 
 // ---- Shadow Map Constants ----
-const int   shadowMapResolution = 2048;
-const float shadowDistance      = 128.0;
+const int   shadowMapResolution = 2048; // [1024 2048 3072 4096]
+const float shadowDistance      = 256.0; // [128.0 192.0 256.0 320.0]
+const float voxelDistance       = 88.0; // Unculled 360-deg radius for 160x96x160 voxel grid (reversed culling)
 const float shadowIntervalSize  = 2.0;
 const float sunPathRotation     = -35.0;
 const float ambientOcclusionLevel = 0.0;
