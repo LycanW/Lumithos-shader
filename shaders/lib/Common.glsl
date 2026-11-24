@@ -17,9 +17,12 @@ float luma(vec3 c)      { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 vec3 srgbToLinear(vec3 c) { return pow(max(c, vec3(0.0)), vec3(2.2)); }
 vec3 linearToSrgb(vec3 c) { return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2)); }
 
-// Extinction per block. Biome color modulates the absorption spectrum over several blocks.
+// Coefficients per block. Biome tint affects absorption; scattering is achromatic.
+const float WATER_SCATTERING = 0.007;
+
 vec3 waterExtinction(vec3 biomeColor) {
-    return vec3(0.045, 0.023, 0.016) - 0.04 * log(clamp(biomeColor, vec3(0.08), vec3(1.0)));
+    vec3 absorption = vec3(0.033, 0.011, 0.004) - 0.04 * log(clamp(biomeColor, vec3(0.08), vec3(1.0)));
+    return absorption + WATER_SCATTERING;
 }
 
 // ---- Stained-Glass / Translucent Light Tinting & Colored Emitters ----

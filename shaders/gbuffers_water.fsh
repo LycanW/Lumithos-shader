@@ -59,8 +59,8 @@ float waveHeight(vec2 p, float t) {
     h += 0.050 * sin(dot(p, vec2( 0.80,  0.60)) * 1.10 + t * 1.30);
     h += 0.035 * sin(dot(p, vec2(-0.55,  0.83)) * 1.70 + t * 1.75);
     h += 0.020 * sin(dot(p, vec2( 0.25, -0.97)) * 2.90 + t * 2.40);
-    h += 0.030 * (valueNoise(p * 1.6 + vec2(t * 0.35, t * 0.22)) - 0.5);
-    h += 0.015 * (valueNoise(p * 4.2 - vec2(t * 0.55, t * 0.41)) - 0.5);
+    h += 0.010 * (valueNoise(p * 1.6 + vec2(t * 0.35, t * 0.22)) - 0.5);
+    h += 0.005 * (valueNoise(p * 2.1 - vec2(t * 0.55, t * 0.41)) - 0.5);
     return h;
 }
 
@@ -209,7 +209,7 @@ void main() {
     // ---- Material parameters ----
     bool viewFromInside = isWater && (isEyeInWater == 1);
     float f0Raw = isWater ? 0.02 : 0.04;
-    float roughness = isWater ? 0.15 : ((vMatId == 2 && tex.a > 0.55 && tex.a < 0.9) ? 0.08 : 0.02);
+    float roughness = isWater ? 0.08 : ((vMatId == 2 && tex.a > 0.55 && tex.a < 0.9) ? 0.08 : 0.02);
     vec3 albedo = srgbToLinear(tex.rgb);
     float pbrEmission = 0.0;
     vec3 N;
@@ -271,11 +271,11 @@ void main() {
     if (isWater) {
         // Biome-tinted Beer-Lambert absorption + single-scatter in-scattering.
         vec3 sigmaT = waterExtinction(vColor.rgb);
-        vec3 sigmaS = vec3(0.012);
         float pathLen = viewFromInside ? 0.0 : min(thickness, 64.0);
         vec3 Tvol = exp(-sigmaT * pathLen);
-        vec3 lightInWater = ambient + directCol * sunVis * 0.35;
-        vec3 inscatter = (1.0 - Tvol) * (sigmaS / sigmaT) * lightInWater;
+        // Isotropic single scattering distributes directional irradiance over 4*pi steradians.
+        vec3 lightInWater = ambient + directCol * sunVis * (0.25 * INV_PI);
+        vec3 inscatter = (1.0 - Tvol) * (WATER_SCATTERING / sigmaT) * lightInWater;
 
         L = transmittedFraction * inscatter;
         T = transmittedFraction * Tvol;
