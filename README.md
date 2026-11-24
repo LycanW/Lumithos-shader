@@ -15,3 +15,7 @@ A real-time hybrid path-tracing shaderpack for Minecraft (Iris + Sodium, OpenGL 
   - Deterministic zero-ghosting pure mirror reflections with virtual-depth parallax TAA reprojection.
 - **LabPBR 1.3 Material Support (`program/GBufferOpaque.glsl`, `lib/Resources.glsl`)**
   - Perceptual roughness, metallic RGB F0, normal maps, and physically scaled block/PBR emission.
+
+## License
+
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
