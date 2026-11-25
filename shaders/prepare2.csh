@@ -1,24 +1,14 @@
 #version 430 compatibility
 
-// Pass: Clear current frame's RC dedup bitmask & worklist counter AND resolve exact glowing color/centroid
-// for ONLY the ~10-300 deduplicated emissive voxels registered by shadow.gsh (<0.01ms total!).
+// Pass: Resolve exact glowing color & Track-2 flame centroid for deduplicated emissive voxels
+// registered by shadow.gsh, and bin them into the 5x3x5 Local Macro-Cell Grid (<0.01ms total!).
 #include "/lib/SceneGeo.glsl"
-#include "/lib/RadianceCache.glsl"
 
 layout(local_size_x = 64) in;
-const ivec3 workGroups = ivec3(192, 1, 1); // 192 * 64 = 12,288 exact RC_DEDUP_WORDS
+const ivec3 workGroups = ivec3(64, 1, 1); // 64 * 64 = 4,096 = MAX_SCENE_LIGHTS
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    if (idx >= RC_DEDUP_WORDS) return;
-
-    uint currSide = uint(frameCounter) & 1u;
-    rcWork.data[currSide * RC_DEDUP_WORDS + idx] = 0u;
-    if (idx == 0u) {
-        rcWork.count[currSide] = 0u;
-    }
-
-    // Resolve exact emitter color & Track 2 flame/core centroid for ONLY actual emissive voxels!
     uint lCount = min(lightList.lightCount, MAX_SCENE_LIGHTS);
     if (idx < lCount) {
         vec4 pAndP = lightList.lights[idx].posAndPower;

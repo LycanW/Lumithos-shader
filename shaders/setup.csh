@@ -26,16 +26,11 @@ void main() {
     surfacePool.surfaces[slot].tintAndSky = 0u;
     surfacePool.surfaces[slot].primHead   = PRIM_END;
 
-    if (slot < RC_TOTAL_CELLS) {
-        rcClipmap.cells[slot] = RCProbe(0u, 0u, uvec2(0u));
-    }
-    if (slot < 2u * RC_DEDUP_WORDS) {
-        rcWork.data[slot] = 0u;
+    if (slot < SC_TOTAL_SLOTS) {
+        scTable.entries[slot] = SurfaceCacheEntry(0u, 0u, uvec2(0u));
     }
     if (slot == 0u) {
         primPool.primCount = 0u;
         lightList.lightCount = 0u;
-        rcWork.count[0] = 0u;
-        rcWork.count[1] = 0u;
     }
 }

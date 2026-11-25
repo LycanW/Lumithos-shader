@@ -127,29 +127,19 @@ layout(std430, binding = 1) coherent buffer PrimPoolBuffer {
     ScenePrim prims[];
 } primPool;
 
-// ---- O(1) 3-Cascade Toroidal 3D Clipmap Radiance Cache (16 bytes/probe = 1x 128-bit load!) ----
-// word0: worldKey (worldCell.x:10 | y:10 | z:10 | cascade:2, XOR 1 -> 0 = empty)
-// word1: normalized Co(10b signed) | Cg(10b signed) | accumFrames(12b)
-// word2..3: packHalf4x16(L0_Y, L1_x, L1_y, L1_z)
-struct RCProbe {
-    uint  worldKey;
-    uint  chromaFrames;
-    uvec2 shLuma;
+// ---- World-Space 4-Way Set-Associative Surface Hash Cache (16 bytes/entry, 64B cache-line buckets!) ----
+// key:  cell.x(9b) | cell.y(9b) | cell.z(9b) | (faceIdx+1)(3b: 1..6, 0=empty) | lod(2b: 0..3)
+// meta: accum(10b) | lastUsedFrame(14b) | guideU(4b) | guideV(4b)
+// rad:  packHalf2x16(irradiance.rg), packHalf2x16(vec2(irradiance.b, guideConcentration))
+struct SurfaceCacheEntry {
+    uint  key;
+    uint  meta;
+    uvec2 rad;
 };
 
-layout(std430, binding = 2) buffer RadianceCacheClipmap {
-    RCProbe cells[];
-} rcClipmap;
-
-// Ping-pong active-set dedup bitmask + compacted probe worklist (unsized SSBO -> instant driver link!)
-// data[0 .. 2*RC_DEDUP_WORDS - 1]         = dedup bitmask (2 sides)
-// data[2*RC_DEDUP_WORDS .. +2*RC_WORKLIST_CAP - 1] = active worklist entries (2 sides)
-layout(std430, binding = 3) coherent buffer RadianceCacheWorklist {
-    uint count[2];
-    uint pad0;
-    uint pad1;
-    uint data[];
-} rcWork;
+layout(std430, binding = 2) coherent buffer SurfaceCacheTable {
+    SurfaceCacheEntry entries[];
+} scTable;
 
 // ---- Compact Emissive Voxel LightList + 5x3x5 Local 32^3 Macro-Cell Grid (203 KB, L2-resident!) ----
 struct SceneLight {
@@ -157,7 +147,7 @@ struct SceneLight {
     vec4 colorAndMeta; // rgb: linear rich emitter color, w: packed emitter voxel flags/radius
 };
 
-layout(std430, binding = 4) coherent buffer LightListBuffer {
+layout(std430, binding = 3) coherent buffer LightListBuffer {
     uint lightCount;
     uint pad0;
     uint pad1;

@@ -18,14 +18,13 @@
 #define LIGHT_CELL_TOTAL   75u
 #define LIGHT_CELL_CAP     256u
 
-// ---- O(1) 3-Cascade Toroidal 3D Clipmap Radiance Cache ----
-#define RC_XZ              64
-#define RC_Y               32
-#define RC_CASCADES        3
-#define RC_CASCADE_CELLS   131072u
-#define RC_TOTAL_CELLS     393216u
-#define RC_DEDUP_WORDS     12288u
-#define RC_WORKLIST_CAP    8192u
+// ---- World-Space 4-Way Set-Associative Surface Hash Cache (262,144 directed patches = 4.0 MB) ----
+#define SC_NUM_BUCKETS      65536u
+#define SC_BUCKET_SIZE      4u
+#define SC_TOTAL_SLOTS      262144u
+#define SC_ACTIVE_WINDOW    4u
+#define SC_STALE_FRAMES     24u
+#define SC_WARMUP_SAMPLES   8u
 
 // ---- Feature Toggles ----
 // Diffuse tracing resolution: 0 = 1/4 (2x2 Bayer), 1 = 1/2 (Checkerboard), 2 = 1/1 (Full-Res)
@@ -54,9 +53,9 @@
 #define DIFFUSE_MAX_STEPS     64
 #define SPECULAR_MAX_STEPS    96
 #define RC_MAX_STEPS          64
-#define RC_UPDATE_PERIOD      4u
-#define RC_WARMUP_UPDATES     12u
-#define RC_MAX_ACCUM          128.0
+#define SC_MAX_ACCUM_NEAR     48.0
+#define SC_MAX_ACCUM_MID      72.0
+#define SC_MAX_ACCUM_FAR      96.0
 #define DIFFUSE_MAX_HISTORY   96.0
 #define SPECULAR_MAX_HISTORY  32.0
 #define EMISSIVE_SCALE        3.5
