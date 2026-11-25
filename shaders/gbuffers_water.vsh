@@ -29,8 +29,9 @@ void main() {
     vTexCoord  = (gl_TextureMatrix[0] * gl_MultiTexCoord0).xy;
     vColor     = gl_Color;
     vSkyLight  = saturate((gl_MultiTexCoord1.y - 8.0) / 232.0);
-    vBlockEmit = saturate(at_midBlock.w / 15.0);
 
     int id = int(mc_Entity.x + 0.5);
     vMatId = (id == 10001) ? 1 : ((id == 10003) ? 2 : 0);
+    // On fluid faces Iris supplies the host block's emission (e.g. waterlogged amethyst).
+    vBlockEmit = vMatId == 1 ? 0.0 : saturate(at_midBlock.w / 15.0);
 }

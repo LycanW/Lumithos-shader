@@ -28,5 +28,5 @@ void main() {
     vColor    = gl_Color;
     vIsWater  = int(mc_Entity.x + 0.5) == 10001 ? 1 : 0;
     vSkyLight = saturate((gl_MultiTexCoord1.y - 8.0) / 232.0);
-    vEmissive = clamp(at_midBlock.w, 0.0, 15.0);
+    vEmissive = vIsWater != 0 ? 0.0 : clamp(at_midBlock.w, 0.0, 15.0);
 }
