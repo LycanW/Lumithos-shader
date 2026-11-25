@@ -33,7 +33,10 @@ layout(location = 0) out vec4 radianceOut;
 layout(location = 1) out vec4 transmitOut;
 layout(location = 2) out vec4 refractOut;
 
-// Confidence falls to zero at the edge so PT can take over before the screen hit disappears.
+// Zero-thickness 3D plane-exact current-frame SSR for water & glass (uses ONLY depthtex1 + colortex5):
+// - Reconstructs exact view-space surface normal from adjacent depthtex1 pixels (no colortex1/2 needed in gbuffers!).
+// - Enforces front-to-back crossing + 6-step binary refinement + 3D plane distance + collinearity check;
+//   any miss falls back immediately to exact 3D voxel path-traced reflection!
 float traceTranslucentSSR(vec3 viewPos, vec3 viewR, float dither, out vec3 hitCol) {
     hitCol = vec3(0.0);
     float maxT = 2.0 * far;
@@ -52,31 +55,74 @@ float traceTranslucentSSR(vec3 viewPos, vec3 viewR, float dither, out vec3 hitCo
     const int STEPS = 28;
     vec3 stepV = delta / float(STEPS);
     vec2 res = screenSize();
+    ivec2 maxPx = ivec2(res) - 1;
     vec3 prevP = s0;
+    float prevRayZ = -viewPos.z;
+
     for (int i = 0; i < STEPS; ++i) {
         float stepIndex = (i == STEPS - 1) ? float(STEPS) : float(i) + 0.5 + 0.5 * dither;
         vec3 p = s0 + stepV * stepIndex;
-        if (any(lessThan(p.xy, vec2(0.0))) || any(greaterThanEqual(p.xy, vec2(1.0))) || p.z <= 0.0) return 0.0;
-        float sd = texelFetch(depthtex1, ivec2(p.xy * res), 0).r;
-        if (sd >= 0.999999 || p.z <= sd) { prevP = p; continue; }
+        if (any(lessThan(p.xy, vec2(0.0))) || any(greaterThanEqual(p.xy, vec2(1.0))) || p.z <= 0.0 || p.z >= 1.0) return 0.0;
+        ivec2 px = clamp(ivec2(p.xy * res), ivec2(0), maxPx);
+        float sd = texelFetch(depthtex1, px, 0).r;
+        float rayZ = linearizeDepth(p.z);
+        if (sd >= 0.999999 || p.z <= sd) { prevP = p; prevRayZ = rayZ; continue; }
 
-        // Binary refinement between prevP (in front) and p (behind).
-        vec3 a = prevP;
-        vec3 b = p;
-        for (int k = 0; k < 8; ++k) {
-            vec3 m = 0.5 * (a + b);
-            float md = texelFetch(depthtex1, ivec2(m.xy * res), 0).r;
-            if (m.z > md) b = m; else a = m;
+        // Skip ultra-near first-person hand depth slab without needing G-buffer integer samplers.
+        if (sd < 0.56) { prevP = p; prevRayZ = rayZ; continue; }
+
+        float sceneZ = linearizeDepth(sd);
+        float stepDZ = rayZ - prevRayZ;
+        float diffZ0 = rayZ - sceneZ;
+        // Step-bracket crossing test only (zero artificial surface thickness!).
+        float stepBracket = max(0.10, abs(stepDZ) * 1.15);
+
+        if (prevRayZ <= sceneZ + 0.03 && diffZ0 > 0.0 && diffZ0 < stepBracket) {
+            vec3 a = prevP;
+            vec3 b = p;
+            for (int k = 0; k < 6; ++k) {
+                vec3 m = 0.5 * (a + b);
+                ivec2 mpx = clamp(ivec2(m.xy * res), ivec2(0), maxPx);
+                float md = texelFetch(depthtex1, mpx, 0).r;
+                if (md < 0.999999 && m.z > md) b = m; else a = m;
+            }
+            ivec2 bpx = clamp(ivec2(b.xy * res), ivec2(0), maxPx);
+            float bd = texelFetch(depthtex1, bpx, 0).r;
+            if (bd >= 0.56 && bd < 0.999999) {
+                vec3 bRayView = screenToView(b);
+                vec3 bHitView = screenToView(vec3(b.xy, bd));
+
+                // Reconstruct local 3D surface normal from neighboring depthtex1 taps (zero G-buffer dependency).
+                ivec2 rxPx = clamp(bpx + ivec2(bpx.x < maxPx.x ? 1 : -1, 0), ivec2(0), maxPx);
+                ivec2 ryPx = clamp(bpx + ivec2(0, bpx.y < maxPx.y ? 1 : -1), ivec2(0), maxPx);
+                float dX = texelFetch(depthtex1, rxPx, 0).r;
+                float dY = texelFetch(depthtex1, ryPx, 0).r;
+                vec3 vX = screenToView(vec3((vec2(rxPx) + 0.5) * texelSize(), dX));
+                vec3 vY = screenToView(vec3((vec2(ryPx) + 0.5) * texelSize(), dY));
+                vec3 rawN = cross(vX - bHitView, vY - bHitView);
+                float nLen = length(rawN);
+                vec3 hitViewN = (nLen > 1e-6) ? (rawN / nLen) : normalize(-bHitView);
+                if (dot(hitViewN, -bHitView) < 0.0) hitViewN = -hitViewN;
+
+                if (dot(hitViewN, viewR) < -0.02) {
+                    float planeDist = abs(dot(bRayView - bHitView, hitViewN));
+                    float planeTol  = max(0.025, 0.006 * (-bHitView.z));
+                    if (planeDist <= planeTol) {
+                        vec3 toHit = bHitView - viewPos;
+                        float d = length(toHit);
+                        if (d > 0.08 && dot(toHit / max(d, 1e-5), viewR) > 0.985) {
+                            hitCol = max(texelFetch(colortex5, bpx, 0).rgb, vec3(0.0));
+                            vec2 edge = min(b.xy, 1.0 - b.xy);
+                            if (!any(isnan(hitCol)) && !any(isinf(hitCol))) {
+                                return smoothstep(0.0, 0.03, min(edge.x, edge.y));
+                            }
+                        }
+                    }
+                }
+            }
         }
-        float bd = texelFetch(depthtex1, ivec2(b.xy * res), 0).r;
-        float diffZ = linearizeDepth(b.z) - linearizeDepth(bd);
-        if (bd < 0.999999 && diffZ > -0.05 && diffZ < 0.35 + 0.04 * linearizeDepth(bd)) {
-            hitCol = max(texelFetch(colortex5, ivec2(b.xy * res), 0).rgb, vec3(0.0));
-            vec2 edge = min(b.xy, 1.0 - b.xy);
-            if (any(isnan(hitCol)) || any(isinf(hitCol))) return 0.0;
-            return smoothstep(0.0, 0.03, min(edge.x, edge.y));
-        }
-        return 0.0;
+        prevP = p;
+        prevRayZ = rayZ;
     }
     return 0.0;
 }
