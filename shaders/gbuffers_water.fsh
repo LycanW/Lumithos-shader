@@ -18,6 +18,7 @@
 uniform sampler2D gtexture;
 uniform sampler2D normals;
 uniform sampler2D specular;
+layout(rgba16f) uniform readonly image2D colorimg0;
 
 in vec2  vTexCoord;
 in vec4  vColor;
@@ -33,7 +34,7 @@ layout(location = 0) out vec4 radianceOut;
 layout(location = 1) out vec4 transmitOut;
 layout(location = 2) out vec4 refractOut;
 
-// Zero-thickness 3D plane-exact current-frame SSR for water & glass (uses ONLY depthtex1 + colortex5):
+// Current-frame SSR reads opaque depth and the lit scene after aerial perspective.
 // - Reconstructs exact view-space surface normal from adjacent depthtex1 pixels (no colortex1/2 needed in gbuffers!).
 // - Enforces front-to-back crossing + 6-step binary refinement + 3D plane distance + collinearity check;
 //   any miss falls back immediately to exact 3D voxel path-traced reflection!
@@ -111,7 +112,7 @@ float traceTranslucentSSR(vec3 viewPos, vec3 viewR, float dither, out vec3 hitCo
                         vec3 toHit = bHitView - viewPos;
                         float d = length(toHit);
                         if (d > 0.08 && dot(toHit / max(d, 1e-5), viewR) > 0.985) {
-                            hitCol = max(texelFetch(colortex5, bpx, 0).rgb, vec3(0.0));
+                            hitCol = max(imageLoad(colorimg0, bpx).rgb, vec3(0.0));
                             vec2 edge = min(b.xy, 1.0 - b.xy);
                             if (!any(isnan(hitCol)) && !any(isinf(hitCol))) {
                                 return smoothstep(0.0, 0.03, min(edge.x, edge.y));

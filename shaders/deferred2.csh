@@ -1,6 +1,6 @@
 #version 430 compatibility
 
-// Pass: Specular Reflection (1 SPP GGX VNDF + 24-step SSR + Hybrid 6-Face/Non-Cube Raytrace)
+// Pass: Specular Reflection (1 SPP GGX VNDF + 24-step frustum-bounded SSR + Hybrid 6-Face/Non-Cube Raytrace)
 #define TRACE_HIGH_PRIM_GUARD
 #include "/lib/SpecularTrace.glsl"
 #include "/lib/ScreenTrace.glsl"
@@ -75,7 +75,7 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
         if (frameCounter > 1 && roughness >= 0.25) {
             vec2 prevHitUV;
             float ssDist;
-            if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * geoNormal) * 0.04, rayDir, 24, 0.65, stbn2D(bnPx, frameCounter, 10u).x, 0.25, prevHitUV, ssDist)) {
+            if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * geoNormal) * 0.04, rayDir, 24, stbn2D(bnPx, frameCounter, 10u).x, 0.25, prevHitUV, ssDist)) {
                 ivec2 hpx = clamp(ivec2(prevHitUV * screenSize()), ivec2(0), res - 1);
                 vec3 prevLit = texelFetch(colortex5, hpx, 0).rgb;
                 if (!any(isnan(prevLit)) && !any(isinf(prevLit))) {

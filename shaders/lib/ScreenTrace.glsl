@@ -10,28 +10,31 @@
 // - Validates the 6-step refined hit directly against the pixel's 3D geometric surface plane
 //   (abs(dot(bRayView - bHitView, hitViewGeoN)) <= subpixel tolerance) + front-facing normal + strict collinearity;
 //   any miss falls back immediately to exact 3D voxel path-traced reflection!
-bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float maxScreenLen, float dither, float minWorldDist, out vec2 prevHitUV, out float hitDist) {
+bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float dither, float minWorldDist, out vec2 prevHitUV, out float hitDist) {
     prevHitUV = vec2(-1.0);
     hitDist = 0.0;
 
     vec3 viewDir = normalize(mat3(gbufferModelView) * worldDir);
     if (viewDir.z > 0.92) return false; // pointing back toward camera
 
-    vec3 rayStart = viewToScreen(viewOrigin);
-    float maxViewT = viewDir.z > 0.0 ? min(48.0, -(viewOrigin.z + near * 1.2) / max(viewDir.z, 1e-4)) : 48.0;
-    if (maxViewT <= minWorldDist) return false;
+    vec4 clipOrigin = gbufferProjection * vec4(viewOrigin, 1.0);
+    if (clipOrigin.w <= 0.0) return false;
+    vec4 clipDir = gbufferProjection * vec4(viewDir, 0.0);
+    vec3 ndc = clipOrigin.xyz / clipOrigin.w;
+    vec3 rayDelta = clipDir.xyz - ndc * clipDir.w;
+    #ifdef TAA_ENABLED
+        ndc.xy += taaJitter;
+    #endif
+    vec3 rayStart = ndc * 0.5 + 0.5;
 
-    vec3 rayEnd = viewToScreen(viewOrigin + viewDir * maxViewT);
-    vec3 rayDelta = rayEnd - rayStart;
+    // The projected ray exits at the first screen edge or near/far depth plane.
+    vec3 toEdge = mix(rayStart, 1.0 - rayStart, greaterThan(rayDelta, vec3(0.0)));
+    vec3 exitT = mix(vec3(1e20), toEdge / max(abs(rayDelta), vec3(1e-20)), notEqual(rayDelta, vec3(0.0)));
+    rayDelta *= max(0.0, minOf(exitT));
+    if (max(abs(rayDelta.x), abs(rayDelta.y)) < 0.002) return false;
 
-    vec2 screenLen = abs(rayDelta.xy);
-    float maxComp = max(screenLen.x, screenLen.y);
-    if (maxComp < 0.002) return false;
-    if (maxComp > maxScreenLen) {
-        rayDelta *= maxScreenLen / maxComp;
-    }
-
-    vec3 rayStep = rayDelta / float(steps);
+    float tapSpan = float(steps) + max(dither - 0.5, 0.0) + 0.001;
+    vec3 rayStep = rayDelta / tapSpan;
     vec2 res = screenSize();
     ivec2 maxPx = ivec2(res) - 1;
 
@@ -40,7 +43,7 @@ bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float maxScreen
 
     for (int i = 0; i < steps; ++i) {
         vec3 p = rayStart + rayStep * (float(i) + dither + 0.5);
-        if (any(lessThan(p.xy, vec2(0.002))) || any(greaterThanEqual(p.xy, vec2(0.998))) || p.z <= 0.0 || p.z >= 1.0) {
+        if (any(lessThan(p.xy, vec2(0.0))) || any(greaterThanEqual(p.xy, vec2(1.0))) || p.z <= 0.0 || p.z >= 1.0) {
             return false;
         }
         ivec2 px = clamp(ivec2(p.xy * res), ivec2(0), maxPx);
