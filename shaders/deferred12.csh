@@ -342,6 +342,11 @@ void main() {
     }
 
     // Direct Specular Highlight (Cook-Torrance GGX with Height-Correlated Smith Visibility & LabPBR RGB F0)
+    // Match deferred2.csh's grazing normal-map horizon fix so steep bevels keep consistent NdotV/Fresnel!
+    float rawNdotV = dot(mat.shadeNormal, viewDir);
+    if (rawNdotV < 0.05) {
+        mat.shadeNormal = normalize(mat.shadeNormal + viewDir * (0.05 - rawNdotV));
+    }
     vec3 F0_rgb = evalLabPBRF0(mat.f0, mat.albedo);
     bool isMetal = isLabPBRMetal(mat.f0);
     float NdotV = max(dot(mat.shadeNormal, viewDir), 1e-4);

@@ -360,15 +360,22 @@ vec3 evalLabPBRF0(float f0Raw, vec3 albedoLinear) {
     if (code < 230) {
         return vec3(max(f0Raw, 0.02));
     }
-    if (code == 230) return vec3(0.562, 0.565, 0.578); // Iron
-    if (code == 231) return vec3(1.000, 0.766, 0.336); // Gold
-    if (code == 232) return vec3(0.913, 0.921, 0.925); // Aluminum
-    if (code == 233) return vec3(0.550, 0.556, 0.554); // Chrome
-    if (code == 234) return vec3(0.955, 0.637, 0.538); // Copper
-    if (code == 235) return vec3(0.632, 0.626, 0.641); // Lead
-    if (code == 236) return vec3(0.672, 0.637, 0.585); // Platinum
-    if (code == 237) return vec3(0.972, 0.960, 0.915); // Silver
-    return albedoLinear;                               // 238..255: Albedo-tinted metal
+    if (code >= 238) {
+        return albedoLinear;                               // 238..255: Albedo-tinted metal
+    }
+    vec3 metalF0;
+    if (code == 230)      metalF0 = vec3(0.562, 0.565, 0.578); // Iron
+    else if (code == 231) metalF0 = vec3(1.000, 0.766, 0.336); // Gold
+    else if (code == 232) metalF0 = vec3(0.913, 0.921, 0.925); // Aluminum
+    else if (code == 233) metalF0 = vec3(0.550, 0.556, 0.554); // Chrome
+    else if (code == 234) metalF0 = vec3(0.955, 0.637, 0.538); // Copper
+    else if (code == 235) metalF0 = vec3(0.632, 0.626, 0.641); // Lead
+    else if (code == 236) metalF0 = vec3(0.672, 0.637, 0.585); // Platinum
+    else                  metalF0 = vec3(0.972, 0.960, 0.915); // Silver
+    // Preserve artist-painted panel seams, rivets, hinges, and crevices in albedo on hardcoded
+    // LabPBR metals (230..237) while keeping polished metal faces at 100% physical F0!
+    float detail = clamp(maxOf(albedoLinear) * 1.25, 0.04, 1.0);
+    return metalF0 * detail;
 }
 
 #endif

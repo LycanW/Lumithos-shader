@@ -28,15 +28,29 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
     float camDist  = length(eyeToSurf);
     vec3 viewDir   = -eyeToSurf / max(camDist, 1e-4); // toward actual bobbed camera eye in world space
 
+    // Grazing normal-map horizon fix: prevent steep normal-mapped tile bevels from facing away
+    // from a grazing camera viewDir (which would reflect underground into pitch-black tile grooves!).
+    float rawNdotV = dot(shadeNormal, viewDir);
+    if (rawNdotV < 0.05) {
+        shadeNormal = normalize(shadeNormal + viewDir * (0.05 - rawNdotV));
+    }
+
     vec3 H;
     vec3 rayDir = sampleReflectionDirection(viewDir, shadeNormal, roughness, bnPx, H);
 
-    // Physical Heitz VNDF microfacet horizon test: rays reflected below the surface are self-occluded
-    // (weight = 0), NEVER replaced with a fake mirror reflection!
     float NdotV = max(dot(shadeNormal, viewDir), 1e-4);
     float NdotL = dot(shadeNormal, rayDir);
-    if (dot(rayDir, geoNormal) <= 1e-4 || NdotL <= 1e-4) {
+    if (NdotL <= 1e-4) {
         return vec4(0.0, 0.0, 0.0, 0.0);
+    }
+
+    // Normal-mapped bevel/bump reflection dipping below the macro plane:
+    // lift smoothly onto the grazing macro horizon instead of returning pitch-black 0.0!
+    float GdotL = dot(rayDir, geoNormal);
+    if (GdotL <= 0.02) {
+        rayDir = normalize(rayDir + geoNormal * (0.025 - GdotL));
+        H = normalize(viewDir + rayDir);
+        NdotL = max(dot(shadeNormal, rayDir), 1e-4);
     }
 
     vec3 brdfRatio = vec3(1.0);
@@ -44,7 +58,7 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
         float alpha = max(roughness * roughness, 0.002);
         float VdotH = saturate(dot(viewDir, H));
         float g2OverG1 = smithGGX_G2OverG1(NdotV, NdotL, alpha);
-        vec3 albedoLin = (f0Raw >= (237.5 / 255.0)) ? srgbToLinear(unpackUnorm4x8(texelFetch(colortex1, px, 0).r).rgb) : vec3(0.0);
+        vec3 albedoLin = isLabPBRMetal(f0Raw) ? srgbToLinear(unpackUnorm4x8(texelFetch(colortex1, px, 0).r).rgb) : vec3(0.0);
         vec3 F0_rgb = evalLabPBRF0(f0Raw, albedoLin);
         vec3 F_vh = fresnelSchlick(F0_rgb, VdotH);
         vec3 envBrdf = evalEnvBRDF(F0_rgb, NdotV, roughness);

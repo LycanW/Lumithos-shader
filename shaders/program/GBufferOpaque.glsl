@@ -62,7 +62,7 @@
         #ifdef STAGE_BASIC
             vec4 tex = vec4(1.0);
         #else
-            vec4 tex = texture(gtexture, vTexCoord);
+            vec4 tex = texture(gtexture, vTexCoord, -0.75);
         #endif
 
         if (tex.a < alphaTestRef) discard;
@@ -84,7 +84,7 @@
         vec3 shadeNormal = geoNormal;
         float matAO = 1.0;
         #if defined(MC_NORMAL_MAP) && !defined(STAGE_BASIC)
-            vec4 normTex = texture(normals, vTexCoord);
+            vec4 normTex = texture(normals, vTexCoord, -0.75);
             shadeNormal = applyLabPBRNormal(geoNormal, vTangent, normTex.rg);
             // LabPBR 1.3 normals.b encodes micro-surface AO (guard near-zero empty channels).
             if (normTex.b > 0.01) {
