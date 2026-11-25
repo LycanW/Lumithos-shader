@@ -613,7 +613,8 @@ vec3 sampleDirectLightsNEE(vec3 worldPos, vec3 normal, bool isSphere, int maxCan
 
         float dist = sqrt(max(dist2, 1e-6));
         vec3 lDir = toL / dist;
-        float geom = isSphere ? 0.40 : max(dot(normal, lDir), 0.0);
+        // Analytical spherical average of max(N.L, 0) over S^2 is exactly 0.25.
+        float geom = isSphere ? 0.25 : max(dot(normal, lDir), 0.0);
         if (geom <= 1e-4) continue;
 
         float rRatio = dist / maxRange;
@@ -622,7 +623,9 @@ vec3 sampleDirectLightsNEE(vec3 worldPos, vec3 normal, bool isSphere, int maxCan
         win *= win;
         float atten = win / (dist2 + 0.35);
 
-        vec3 contrib = L.colorAndMeta.rgb * (emitStr * 4.2 * atten * geom * cellScale);
+        // Physically calibrated E/PI power matching EMISSIVE_GI_SCALE * A_proj * INV_PI.
+        float neePower = (L.colorAndMeta.a < 0.3) ? 1.55 : 1.35;
+        vec3 contrib = L.colorAndMeta.rgb * (emitStr * neePower * atten * geom * cellScale);
         float w = luma(contrib);
         if (w <= 1e-6) continue;
 

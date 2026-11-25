@@ -60,7 +60,7 @@
 #define DIFFUSE_MAX_HISTORY   96.0
 #define SPECULAR_MAX_HISTORY  32.0
 #define EMISSIVE_SCALE        3.5
-#define EMISSIVE_GI_SCALE     10.0
+#define EMISSIVE_GI_SCALE     5.5
 #define SPECULAR_ROUGH_CUTOFF 0.65
 
 // ---- Shadow Map Constants ----
