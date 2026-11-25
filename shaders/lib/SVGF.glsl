@@ -113,6 +113,8 @@ vec4 fetchHistoryFast4(sampler2D tex, vec2 uv, ivec2 res, ivec2 tileOff) {
 // for intricate 3D latticework / armor stands / curved geometry where <3 neighbors share the same normal!
 vec3 despike3x3(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol, vec3 geoN, vec3 shadeN, float centerDepth, float ratio, float floorVal) {
     float cLuma = luma(centerCol);
+    float centerLinZ = linearizeDepth(centerDepth);
+    float depthTol = max(0.08, 0.06 * centerLinZ);
     float maxN = 0.0, secondMax = 0.0;
     float dMaxN = 0.0, dSecondMax = 0.0;
     int valid = 0, dValid = 0;
@@ -122,7 +124,7 @@ vec3 despike3x3(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol, vec3 ge
             ivec2 q = px + ivec2(x, y);
             if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
             float qd = texelFetch(depthtex1, q, 0).r;
-            if (qd >= 0.999999 || abs(qd - centerDepth) > 0.020 * max(centerDepth, 0.01)) continue;
+            if (qd >= 0.999999 || abs(linearizeDepth(qd) - centerLinZ) > depthTol) continue;
             vec4 qt = texelFetch(noisyTex, q, 0);
             if (qt.a < 0.0) continue;
             vec3 qc = max(qt.rgb, vec3(0.0));
@@ -159,6 +161,8 @@ vec3 despikeCheckerboard(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol
         ivec2(-2,  0), ivec2(2,  0), ivec2( 0,-2), ivec2(0, 2)
     );
     float cLuma = luma(centerCol);
+    float centerLinZ = linearizeDepth(centerDepth);
+    float depthTol = max(0.08, 0.06 * centerLinZ);
     float maxN = 0.0, secondMax = 0.0;
     float dMaxN = 0.0, dSecondMax = 0.0;
     int valid = 0, dValid = 0;
@@ -166,7 +170,7 @@ vec3 despikeCheckerboard(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol
         ivec2 q = px + offs[i];
         if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
         float qd = texelFetch(depthtex1, q, 0).r;
-        if (qd >= 0.999999 || abs(qd - centerDepth) > 0.022 * max(centerDepth, 0.01)) continue;
+        if (qd >= 0.999999 || abs(linearizeDepth(qd) - centerLinZ) > depthTol) continue;
         vec4 qt = texelFetch(noisyTex, q, 0);
         if (qt.a < 0.0) continue;
         vec3 qc = max(qt.rgb, vec3(0.0));
@@ -200,6 +204,8 @@ vec3 despikeCheckerboard(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol
 vec4 checkerboardCrossFill(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 geoN, vec3 shadeN, float centerDepth,
                            bool checkRough, float centerRough) {
     const ivec2 offs[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+    float centerLinZ = linearizeDepth(centerDepth);
+    float depthTol = max(0.08, 0.06 * centerLinZ);
     vec3 sumCol = vec3(0.0);
     float sumDist = 0.0;
     float sumW = 0.0;
@@ -221,15 +227,16 @@ vec4 checkerboardCrossFill(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 geoN, v
         vec3 qGeoN, qShadeN;
         readGBufferNormals(q, qGeoN, qShadeN);
         float dGeo = dot(geoN, qGeoN);
-        float depthDiff = abs(qd - centerDepth) / max(centerDepth, 0.01);
-        float fallW = max(dGeo, 0.0) / (1.0 + depthDiff * 40.0);
+        float linDiff = abs(linearizeDepth(qd) - centerLinZ);
+        float relLinDiff = linDiff / max(centerLinZ, 0.25);
+        float fallW = max(dGeo, 0.0) / (1.0 + relLinDiff * 16.0);
         if (fallW > bestFallW) {
             bestFallW = fallW;
             fallbackCol = qc;
             fallbackDist = qt.a;
         }
 
-        if (dGeo < 0.90 || depthDiff > 0.025) continue;
+        if (dGeo < 0.90 || linDiff > depthTol) continue;
         float dShade = max(dot(shadeN, qShadeN), 0.0);
         if (dShade < 0.45) continue;
 
@@ -266,6 +273,8 @@ ivec2 diffuseQuarterOffset(int frame) {
 // with depth-only fallback for intricate 3D latticework / armor stands / stairs!
 vec3 despikeQuarter(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol, vec3 geoN, vec3 shadeN, float centerDepth, float ratio, float floorVal) {
     float cLuma = luma(centerCol);
+    float centerLinZ = linearizeDepth(centerDepth);
+    float depthTol = max(0.10, 0.07 * centerLinZ);
     float maxN = 0.0, secondMax = 0.0;
     float dMaxN = 0.0, dSecondMax = 0.0;
     int valid = 0, dValid = 0;
@@ -275,7 +284,7 @@ vec3 despikeQuarter(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol, vec
             ivec2 q = px + ivec2(x, y) * 2;
             if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
             float qd = texelFetch(depthtex1, q, 0).r;
-            if (qd >= 0.999999 || abs(qd - centerDepth) > 0.025 * max(centerDepth, 0.01)) continue;
+            if (qd >= 0.999999 || abs(linearizeDepth(qd) - centerLinZ) > depthTol) continue;
             vec3 qc = max(texelFetch(noisyTex, q, 0).rgb, vec3(0.0));
             if (any(isnan(qc)) || any(isinf(qc))) continue;
             float ql = luma(qc);
@@ -307,6 +316,8 @@ vec3 despikeQuarter(sampler2D noisyTex, ivec2 px, ivec2 res, vec3 centerCol, vec
 vec3 quarterBilinearFill(sampler2D noisyTex, ivec2 px, ivec2 res, ivec2 qOff, vec3 geoN, vec3 shadeN, float centerDepth) {
     ivec2 qBase = ((px - qOff) >> 1) * 2 + qOff;
     vec2 f = vec2(px - qBase) * 0.5;
+    float centerLinZ = linearizeDepth(centerDepth);
+    float depthTol = max(0.10, 0.07 * centerLinZ);
 
     vec3 sumCol = vec3(0.0);
     float sumW = 0.0;
@@ -317,7 +328,7 @@ vec3 quarterBilinearFill(sampler2D noisyTex, ivec2 px, ivec2 res, ivec2 qOff, ve
     // so raw spikes never smear into 2x2 bright blocks on disoccluded narrow geometry!
     vec3 cCols[4];
     float cLumas[4];
-    float cDepths[4];
+    float cLinZ[4];
     bool cValid[4];
     float minL = 1e6, secondMinL = 1e6;
     int validCnt = 0;
@@ -329,7 +340,7 @@ vec3 quarterBilinearFill(sampler2D noisyTex, ivec2 px, ivec2 res, ivec2 qOff, ve
         cValid[idx] = false;
         cCols[idx] = vec3(0.0);
         cLumas[idx] = 0.0;
-        cDepths[idx] = 1.0;
+        cLinZ[idx] = 1e6;
         if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
         float qd = texelFetch(depthtex1, q, 0).r;
         if (qd >= 0.999999) continue;
@@ -339,7 +350,7 @@ vec3 quarterBilinearFill(sampler2D noisyTex, ivec2 px, ivec2 res, ivec2 qOff, ve
         cValid[idx] = true;
         cCols[idx] = qc;
         cLumas[idx] = ql;
-        cDepths[idx] = qd;
+        cLinZ[idx] = linearizeDepth(qd);
         if (ql < minL) { secondMinL = minL; minL = ql; }
         else if (ql < secondMinL) { secondMinL = ql; }
         ++validCnt;
@@ -351,7 +362,6 @@ vec3 quarterBilinearFill(sampler2D noisyTex, ivec2 px, ivec2 res, ivec2 qOff, ve
         int i = idx & 1;
         int j = idx >> 1;
         ivec2 q = qBase + ivec2(i * 2, j * 2);
-        float qd = cDepths[idx];
         vec3 qc = cCols[idx];
         if (cLumas[idx] > cornerCap) {
             qc *= cornerCap / max(cLumas[idx], 1e-6);
@@ -361,14 +371,15 @@ vec3 quarterBilinearFill(sampler2D noisyTex, ivec2 px, ivec2 res, ivec2 qOff, ve
         readGBufferNormals(q, qGeoN, qShadeN);
         float bw = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
         float dGeo = dot(geoN, qGeoN);
-        float depthDiff = abs(qd - centerDepth) / max(centerDepth, 0.01);
-        float fallW = (max(dGeo, 0.0) + 0.05) * (bw + 0.05) / (1.0 + depthDiff * 40.0);
+        float linDiff = abs(cLinZ[idx] - centerLinZ);
+        float relLinDiff = linDiff / max(centerLinZ, 0.25);
+        float fallW = (max(dGeo, 0.0) + 0.05) * (bw + 0.05) / (1.0 + relLinDiff * 16.0);
         if (fallW > bestFallW) {
             bestFallW = fallW;
             fallbackCol = qc;
         }
 
-        if (dGeo < 0.90 || depthDiff > 0.03) continue;
+        if (dGeo < 0.90 || linDiff > depthTol) continue;
         float dShade = max(dot(shadeN, qShadeN), 0.0);
         if (dShade < 0.45) continue;
 

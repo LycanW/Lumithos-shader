@@ -27,8 +27,10 @@ void main() {
     uint g1 = texelFetch(colortex2, px, 0).r;
     vec3 centerGeoN = unpackNormal16(g1 & 65535u);
 
-    // Leave-One-Out geometry-aware 3x3 spatial moment estimation (stride 1 catches 1-2px narrow bars,
-    // latticework, armor stands, and stair edges that stride-2 jumps right over!), with depth-only fallback!
+    // Leave-One-Out geometry-aware 3x3 spatial moment estimation (strict linear view-space depth check
+    // prevents foreground door/wall silhouettes from bleeding across window cutouts into background rooms!).
+    float centerLinZ = linearizeDepth(depth);
+    float depthTol = max(0.10, 0.06 * centerLinZ);
     vec2 moments = vec2(0.0);
     float wSum = 0.0;
     vec2 dMoments = vec2(0.0);
@@ -40,11 +42,11 @@ void main() {
             float qd = texelFetch(depthtex1, q, 0).r;
             if (qd >= 0.999999) continue;
 
+            if (abs(linearizeDepth(qd) - centerLinZ) > depthTol) continue;
             float ql = luma(max(texelFetch(scratchTex, q, 0).rgb, vec3(0.0)));
-            if (abs(qd - depth) <= 0.025 * max(depth, 0.01)) {
-                dMoments += vec2(ql, ql * ql);
-                dWSum += 1.0;
-            }
+            dMoments += vec2(ql, ql * ql);
+            dWSum += 1.0;
+
             uint qg1 = texelFetch(colortex2, q, 0).r;
             vec3 qGeoN = unpackNormal16(qg1 & 65535u);
             if (dot(centerGeoN, qGeoN) < 0.85) continue;

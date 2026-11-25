@@ -143,8 +143,8 @@ void main() {
         oldMom  /= support;
     }
 
-    // Untraced checkerboard pixel: reuse exact reprojected history (zero blur on static/moving surfaces!)
-    // or cross-fill from the 4 adjacent traced pixels when disoccluded!
+    // Untraced pixel: reuse exact reprojected history (zero spatial blur on static/moving surfaces!)
+    // or geometry-aware fill from surrounding traced pixels when disoccluded!
     if (!isTraced) {
         if (support > 1e-4) {
             imageStore(diffHistImg, px + currSlowOff, roundHalf(vec4(oldSlow, oldAge)));
@@ -159,7 +159,7 @@ void main() {
             #endif
             float fl = luma(filled);
             imageStore(diffHistImg, px + currSlowOff, roundHalf(vec4(filled, 0.5)));
-            imageStore(diffHistImg, px + currFastOff, roundHalf(vec4(fl, fl, 0.5, 0.0)));
+            imageStore(diffHistImg, px + currFastOff, roundHalf(vec4(filled, 0.5)));
             imageStore(diffMomImg,  px + currMomOff,  vec4(fl, fl * fl, 0.0, 0.0));
             imageStore(scratchImg,  px,               roundHalf(vec4(filled, 1.0)));
         }
@@ -171,50 +171,70 @@ void main() {
     // Preserve distant small-emitter hits while suppressing extreme multi-light fireflies.
     #if DIFFUSE_MODE == 0
         vec3 curr = despikeQuarter(colortex3, px, res, raw, geoNormal, shadeNormal, depth, 6.0, 0.8);
+        const float maxHist    = min(DIFFUSE_MAX_HISTORY, 48.0);
+        const float fastWindow = 6.0;
     #elif DIFFUSE_MODE == 1
         vec3 curr = despikeCheckerboard(colortex3, px, res, raw, geoNormal, shadeNormal, depth, 6.0, 0.8);
+        const float maxHist    = min(DIFFUSE_MAX_HISTORY, 64.0);
+        const float fastWindow = 8.0;
     #else
         vec3 curr = despike3x3(colortex3, px, res, raw, geoNormal, shadeNormal, depth, 6.0, 0.8);
+        const float maxHist    = DIFFUSE_MAX_HISTORY;
+        const float fastWindow = 12.0;
     #endif
     float currLuma = luma(curr);
 
-    float age = min(DIFFUSE_MAX_HISTORY, oldAge + 1.0);
+    float age = min(maxHist, oldAge + 1.0);
     float alpha = 1.0 / max(age, 1.0);
 
-    // Variance-aware responsive history (stable on dark/multi-lantern scenes, fast on real light changes).
-    float fastAlpha = 1.0 / min(age, 12.0);
-    float fastSafeLuma = (oldAge > 8.0) ? min(currLuma, max(oldFast.y * 4.0 + 0.5, 1.5)) : currLuma;
-    float fastLuma  = mix(oldFast.x, fastSafeLuma, fastAlpha);
-    float slowLuma  = mix(oldFast.y, currLuma, alpha);
+    // Full-RGB dual-EMA dynamic-lighting detector (stored in currFastOff, zero extra VRAM):
+    // Rock-solid (3.5-sigma) on static multi-light rooms while responding cleanly to broken/placed lights!
+    float fastAge = min(fastWindow, oldFast.a + 1.0);
+    float fastAlpha = 1.0 / max(fastAge, 1.0);
+    vec3 fastRGB = (support > 1e-4) ? mix(oldFast.rgb, curr, fastAlpha) : curr;
 
-    vec2 moments = mix(oldMom, vec2(fastSafeLuma, fastSafeLuma * fastSafeLuma), alpha);
+    float momAlpha = max(alpha, 1.0 / 24.0);
+    vec2 moments = (support > 1e-4)
+        ? mix(oldMom, vec2(currLuma, currLuma * currLuma), momAlpha)
+        : vec2(currLuma, currLuma * currLuma);
     float stdDev = sqrt(max(moments.y - moments.x * moments.x, 0.0));
 
-    float noiseFloor = 3.5 * stdDev * inversesqrt(12.0) + 0.035;
-    float relChange = abs(fastLuma - slowLuma) / max(max(fastLuma, slowLuma), noiseFloor);
-    float response = smoothstep(0.45, 0.75, relChange);
-
-    if (response > 0.01 && age > 12.0) {
-        float targetAlpha = mix(alpha, 0.20, response);
-        alpha = max(alpha, targetAlpha);
-        age = 1.0 / alpha;
-        if (response > 0.65) slowLuma = fastLuma;
+    float response = 0.0;
+    if (support > 1e-4 && oldAge > fastWindow) {
+        // Exact EMA standard error = sigma / sqrt(2 * fastWindow - 1).
+        float fastErr = stdDev * inversesqrt(max(2.0 * fastWindow - 1.0, 1.0));
+        float lumDiff = abs(luma(fastRGB) - luma(oldSlow));
+        float rgbDiff = length(fastRGB - oldSlow) * 0.57735027;
+        float change  = max(lumDiff, rgbDiff);
+        float noiseFloor = 3.5 * fastErr + 0.035;
+        float relChange = change / max(max(luma(fastRGB), luma(oldSlow)), noiseFloor);
+        float sigRatio  = change / max(noiseFloor, 1e-4);
+        response = smoothstep(0.40, 0.75, relChange) * smoothstep(1.0, 2.0, sigRatio);
     }
 
-    // Soft temporal firefly guard activates briskly (oldAge >= 4) so isolated 1-SPP spikes
-    // on intricate 3D latticework / armor stands never persist for hundreds of frames.
+    if (response > 0.01) {
+        float targetAlpha = mix(alpha, 0.45, response);
+        alpha = max(alpha, targetAlpha);
+        age = 1.0 / alpha;
+    }
+
+    // Soft temporal firefly guard activates only when steady-state (never suppresses real new lights!).
     vec3 safeCurr = curr;
-    if (oldAge >= 4.0 && response < 0.25) {
-        float maxSettledLuma = max(luma(oldSlow) * 5.0 + 0.6, 1.2);
+    if (support > 1e-4 && oldAge >= 4.0 && response < 0.15) {
+        float refLuma = max(luma(oldSlow), luma(fastRGB));
+        float maxSettledLuma = max(refLuma * 5.0 + 0.6, 1.2);
         if (currLuma > maxSettledLuma) {
             safeCurr *= maxSettledLuma / max(currLuma, 1e-6);
         }
     }
 
-    vec3 integrated = mix(oldSlow, safeCurr, alpha);
+    // During strong confirmed lighting transitions, pull oldSlow toward the already-filtered fastRGB
+    // so stale screen-space history clears cleanly across the entire room with zero screen-window residual!
+    vec3 baseSlow = (response > 0.35) ? mix(oldSlow, fastRGB, smoothstep(0.35, 0.85, response) * 0.75) : oldSlow;
+    vec3 integrated = (support > 1e-4) ? mix(baseSlow, safeCurr, alpha) : safeCurr;
 
     imageStore(diffHistImg, px + currSlowOff, roundHalf(vec4(integrated, age)));
-    imageStore(diffHistImg, px + currFastOff, roundHalf(vec4(fastLuma, slowLuma, age, 0.0)));
+    imageStore(diffHistImg, px + currFastOff, roundHalf(vec4(fastRGB, fastAge)));
     imageStore(diffMomImg,  px + currMomOff,  vec4(moments, 0.0, 0.0));
     imageStore(scratchImg,  px,               roundHalf(vec4(integrated, age)));
 }

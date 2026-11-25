@@ -84,17 +84,9 @@ void main() {
         stdDev = sqrt(max(varSum / max(varW, 1e-6), 1e-10));
     #endif
 
-    // Disocclusion-only output A-Trous stride expansion for rough specular (zero extra passes/taps):
-    // Any pixel with valid temporal history (age >= 1.5, including fast camera motion) strictly keeps
-    // standard stride (1, 2); only freshly disoccluded birth-frame pixels (age = 0.5..1.0) widen their
-    // output-only spatial footprint so they match adjacent converged coplanar roughness with zero ghosting!
+    // Uniform A-Trous stride across the entire screen (never widen stride selectively on low specAge,
+    // which otherwise draws a visible rectangular screen-window boundary when rotating the camera!).
     int stride = 1 << ATROUS_PASS;
-    #ifdef ATROUS_SPECULAR
-        ivec2 specHistPx = px + ivec2((frameCounter & 1) * res.x, 0);
-        float specAge = texelFetch(specHistTex, specHistPx, 0).a;
-        float disoccT = smoothstep(1.6, 0.5, specAge) * smoothstep(0.08, 0.30, rough);
-        stride *= (1 + int(round(disoccT * 2.0)));
-    #endif
 
     float phiLuma = isSpec
         ? max(4.5 * stdDev, 0.008)

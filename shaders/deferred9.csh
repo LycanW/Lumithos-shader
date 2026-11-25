@@ -1,17 +1,17 @@
 #version 430 compatibility
 
 // Pass: Physically-Based Specular SVGF Temporal Accumulation
-// 1) Dual reprojection: stabilized specular-dominant virtual reflection reprojection with surface fallback.
-// 2) Exact 3D point-to-plane verification against prevGuideTex (preserves valid virtual parallax on tilted floors/walls).
-// 3) Cumulative GGX lobe angular drift bound: N * dTheta <= 1.5 * roughness^2 (FPS-independent, zero roughness cliffs).
-// 4) Statistical 9-sample (m1 ± 2.5*sigma) variance clamp during parallax to kill occluded-lantern ghosts without dropping samples!
+// 1) Roughness-agnostic planar virtual reflection reprojection using outlier-proof median hitDist.
+// 2) Exact 3D point-to-plane + shading-normal + reflection-space hitDist disocclusion validation against prevGuideTex/specMomTex.
+// 3) Geometric multi-depth parallax pixel-error bound (zero roughness cliffs, zero magic color-clamp hacks!).
+// 4) Dual-EMA dynamic-reflection response via specMomImg (meanLuma, stdDev, prevHitDist, fastLuma in rgba16f).
 #include "/lib/SVGF.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 const vec2 workGroupsRender = vec2(1.0, 1.0);
 
 layout(rgba16f) uniform writeonly image2D specHistImg;
-layout(rg32f)   uniform writeonly image2D specMomImg;
+layout(rgba16f) uniform writeonly image2D specMomImg;
 layout(rgba16f) uniform writeonly image2D scratchImg;
 
 vec3 prevViewFromGuide(ivec2 tap, ivec2 res, float pLinDepth, vec2 prevJitter) {
@@ -22,10 +22,11 @@ vec3 prevViewFromGuide(ivec2 tap, ivec2 res, float pLinDepth, vec2 prevJitter) {
 }
 
 bool validPrevSpecTap(ivec2 tap, ivec2 res, ivec2 prevOff, vec2 prevJitter, vec3 prevSurfView, vec3 prevViewGeoN,
-                      vec3 geoNormal, vec3 shadeNormal, float roughness, float planeTol,
-                      out vec4 outHist, out vec2 outMom) {
+                      vec3 geoNormal, vec3 shadeNormal, float planeTol, float minShadeDot,
+                      bool checkHitDist, float currHitDist, float hitDistTol,
+                      out vec4 outHist, out vec4 outMom) {
     outHist = vec4(0.0);
-    outMom  = vec2(0.0);
+    outMom  = vec4(0.0);
     if (any(lessThan(tap, ivec2(0))) || any(greaterThanEqual(tap, res))) return false;
 
     vec4 pg = texelFetch(prevGuideTex, tap, 0);
@@ -35,27 +36,34 @@ bool validPrevSpecTap(ivec2 tap, ivec2 res, ivec2 prevOff, vec2 prevJitter, vec3
     vec3 pGeoN = unpackNormal16(uint(round(pg.x)));
     if (dot(geoNormal, pGeoN) < 0.90) return false;
     vec3 pShadeN = unpackNormal16(uint(round(pg.y)));
-    if (dot(shadeNormal, pShadeN) < 0.65) return false;
-    if (abs(roughness - pg.z) > max(0.05, 0.22 * max(roughness, pg.z))) return false;
+    if (dot(shadeNormal, pShadeN) < minShadeDot) return false;
 
     vec3 pTapView = prevViewFromGuide(tap, res, pDepth, prevJitter);
     if (abs(dot(pTapView - prevSurfView, prevViewGeoN)) > planeTol) return false;
 
     vec4 hs = texelFetch(specHistTex, tap + prevOff, 0);
-    // Reject non-reflective / skipped pixels (which store age == 0) so matte zero-values
-    // NEVER bleed into adjacent rough reflective surfaces across material boundaries!
+    // specHistTex stores demodulated incoming radiance (specEnv) with hs.a > 0 iff reflective:
+    // never reject on per-texel roughness variation (which broke virtual tracking inside a single block!).
     if (hs.a <= 0.01) return false;
 
+    vec4 hm = texelFetch(specMomTex, tap + prevOff, 0);
+    // Reflection-space disocclusion check: when virtual parallax moves across a foreground/background
+    // reflected edge (e.g., pillar/door vs far wall on the same floor plane), reject mismatched hitDist!
+    if (checkHitDist && hm.b > 0.05 && currHitDist > 0.05) {
+        if (abs(hm.b - currHitDist) > hitDistTol) return false;
+    }
+
     outHist = hs;
-    outMom  = texelFetch(specMomTex, tap + prevOff, 0).rg;
+    outMom  = hm;
     return true;
 }
 
 float fetchPrevSpecHistory(vec2 prevUV, ivec2 res, ivec2 prevOff, vec2 prevJitter, vec3 prevSurfView, vec3 prevViewGeoN,
-                           vec3 geoNormal, vec3 shadeNormal, float roughness, float planeTol, bool allowThinFallback,
-                           out vec3 outSlow, out vec2 outMom, out float outAge) {
+                           vec3 geoNormal, vec3 shadeNormal, float planeTol, float minShadeDot,
+                           bool checkHitDist, float currHitDist, float hitDistTol, bool allowThinFallback,
+                           out vec3 outSlow, out vec4 outMom, out float outAge) {
     outSlow = vec3(0.0);
-    outMom  = vec2(0.0);
+    outMom  = vec4(0.0);
     outAge  = 0.0;
     if (any(lessThan(prevUV, vec2(0.0))) || any(greaterThanEqual(prevUV, vec2(1.0)))) return 0.0;
 
@@ -70,9 +78,10 @@ float fetchPrevSpecHistory(vec2 prevUV, ivec2 res, ivec2 prevOff, vec2 prevJitte
         if (w <= 1e-5) continue;
 
         vec4 hs;
-        vec2 hm;
+        vec4 hm;
         if (!validPrevSpecTap(tap, res, prevOff, prevJitter, prevSurfView, prevViewGeoN,
-                              geoNormal, shadeNormal, roughness, planeTol, hs, hm)) continue;
+                              geoNormal, shadeNormal, planeTol, minShadeDot,
+                              checkHitDist, currHitDist, hitDistTol, hs, hm)) continue;
 
         outSlow += w * hs.rgb;
         outAge  += w * hs.a;
@@ -88,8 +97,7 @@ float fetchPrevSpecHistory(vec2 prevUV, ivec2 res, ivec2 prevOff, vec2 prevJitte
     }
 
     // Thin-geometry (1-3px iron bars / chains / latticework) fallback:
-    // Only runs when 2x2 bilinear misses completely (0ms on normal surfaces); searches a 3x3
-    // neighborhood around the exact jitter-aligned previous pixel to recover subpixel-shifted thin bars!
+    // Only runs when 2x2 bilinear misses completely (0ms on normal surfaces).
     if (allowThinFallback) {
         vec2 alignedUV = prevUV + 0.5 * (prevJitter - taaJitter);
         vec2 alignedPos = alignedUV * vec2(res) - 0.5;
@@ -99,9 +107,10 @@ float fetchPrevSpecHistory(vec2 prevUV, ivec2 res, ivec2 prevOff, vec2 prevJitte
             for (int x = -1; x <= 1; ++x) {
                 ivec2 tap = centerPx + ivec2(x, y);
                 vec4 hs;
-                vec2 hm;
+                vec4 hm;
                 if (!validPrevSpecTap(tap, res, prevOff, prevJitter, prevSurfView, prevViewGeoN,
-                                      geoNormal, shadeNormal, roughness, planeTol, hs, hm)) continue;
+                                      geoNormal, shadeNormal, planeTol, minShadeDot,
+                                      checkHitDist, currHitDist, hitDistTol, hs, hm)) continue;
                 vec2 d = vec2(tap) - alignedPos;
                 float d2 = dot(d, d);
                 if (d2 < bestDistSq) {
@@ -117,25 +126,31 @@ float fetchPrevSpecHistory(vec2 prevUV, ivec2 res, ivec2 prevOff, vec2 prevJitte
     return support;
 }
 
-// Gather local 9-sample (same-parity traced) RGB moments and stabilized hit distance in one pass.
-// Uses rank-2 (second-max) outlier clamping so an isolated single-pixel HDR firefly cannot blow up
-// a newly disoccluded 3x3 strip, while genuine multi-hit glossy reflections stay 100% unbiased!
+// Gather local 9-sample (same-parity traced) RGB moments, exact outlier-proof MEDIAN hit distance,
+// and interquartile hit-distance spread (exact multi-depth parallax ambiguity for wide GGX lobes!).
 void gatherTracedSpecStats(ivec2 px, ivec2 res, bool isTraced, bool useChecker, vec3 centerCol, float centerDist,
                            vec3 geoNormal, vec3 shadeNormal, float centerDepth,
-                           out vec3 outM1, out vec3 outSigma, out float outHitDist, out int outCount) {
+                           out vec3 outM1, out vec3 outSigma, out float outHitDist, out float outDistSpread, out int outCount) {
     vec3 cols[9];
     float lumas[9];
+    float dists[9];
     float maxN = 0.0;
     float secondMax = 0.0;
-    float distSum = 0.0;
+    int distCount = 0;
     outCount = 0;
+
+    float centerLinZ = linearizeDepth(centerDepth);
+    float depthTol = max(0.08, 0.05 * centerLinZ);
 
     if (isTraced) {
         float cl = luma(centerCol);
         cols[0] = centerCol;
         lumas[0] = cl;
         maxN = cl;
-        distSum = min(centerDist, 64.0);
+        if (centerDist > 0.02) {
+            dists[0] = clamp(centerDist, 0.05, 128.0);
+            distCount = 1;
+        }
         outCount = 1;
     }
 
@@ -157,10 +172,10 @@ void gatherTracedSpecStats(ivec2 px, ivec2 res, bool isTraced, bool useChecker, 
         ivec2 q = px + (isTraced ? (useChecker ? cbOffs[i] : fullOffs[i]) : axOffs[i]);
         if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, res))) continue;
         float qd = texelFetch(depthtex1, q, 0).r;
-        if (qd >= 0.999999 || abs(qd - centerDepth) > 0.025 * max(centerDepth, 0.01)) continue;
+        if (qd >= 0.999999 || abs(linearizeDepth(qd) - centerLinZ) > depthTol) continue;
         vec3 qGeoN, qShadeN;
         readGBufferNormals(q, qGeoN, qShadeN);
-        if (dot(geoNormal, qGeoN) < 0.92 || dot(shadeNormal, qShadeN) < 0.70) continue;
+        if (dot(geoNormal, qGeoN) < 0.92 || dot(shadeNormal, qShadeN) < 0.75) continue;
 
         vec4 qt = texelFetch(colortex4, q, 0);
         if (qt.a < 0.0) continue;
@@ -172,7 +187,9 @@ void gatherTracedSpecStats(ivec2 px, ivec2 res, bool isTraced, bool useChecker, 
         lumas[outCount] = ql;
         if (ql > maxN) { secondMax = maxN; maxN = ql; }
         else if (ql > secondMax) { secondMax = ql; }
-        distSum += min(qt.a, 64.0);
+        if (qt.a > 0.02) {
+            dists[distCount++] = clamp(qt.a, 0.05, 128.0);
+        }
         ++outCount;
     }
 
@@ -192,11 +209,33 @@ void gatherTracedSpecStats(ivec2 px, ivec2 res, bool isTraced, bool useChecker, 
         outM1 *= invN;
         m2 *= invN;
         outSigma = sqrt(max(m2 - outM1 * outM1, vec3(0.0)));
-        outHitDist = distSum * invN;
+
+        // Exact register insertion sort on <=9 hit distances -> immune to both short grazing bevels
+        // AND distant sky/window escapes (unlike arithmetic or harmonic means)!
+        if (distCount > 0) {
+            for (int i = 1; i < distCount; ++i) {
+                float key = dists[i];
+                int j = i - 1;
+                while (j >= 0 && dists[j] > key) {
+                    dists[j + 1] = dists[j];
+                    --j;
+                }
+                dists[j + 1] = key;
+            }
+            int mid = distCount >> 1;
+            outHitDist = ((distCount & 1) == 1) ? dists[mid] : 0.5 * (dists[mid - 1] + dists[mid]);
+            int qLo = distCount >> 2;
+            int qHi = distCount - 1 - qLo;
+            outDistSpread = max(dists[qHi] - dists[qLo], 0.0);
+        } else {
+            outHitDist = clamp(centerDist, 0.0, 128.0);
+            outDistSpread = 0.0;
+        }
     } else {
         outM1 = centerCol;
         outSigma = vec3(0.0);
-        outHitDist = min(centerDist, 64.0);
+        outHitDist = clamp(centerDist, 0.0, 128.0);
+        outDistSpread = 0.0;
     }
 }
 
@@ -237,11 +276,13 @@ void main() {
     if (any(isnan(raw)) || any(isinf(raw))) raw = vec3(0.0);
 
     // Pure FLAT deterministic mirrors bypass temporal accumulation completely for zero ghosting,
-    // and preserve hitDist in .a so TAA can reproject at exact planar virtual parallax!
+    // and publish exact hitDist into specMomImg.b + scratchImg.a for glossy neighbors & TAA!
     bool isFlatMirror = (roughness < 0.08) && (dot(shadeNormal, geoNormal) > 0.998);
     if (isFlatMirror) {
+        float rl = luma(raw);
+        float hd = clamp(rawTap.a, 0.0, 128.0);
         imageStore(specHistImg, px + currOff, roundHalf(vec4(raw, 1.0)));
-        imageStore(specMomImg,  px + currOff, vec4(luma(raw), luma(raw) * luma(raw), 0.0, 0.0));
+        imageStore(specMomImg,  px + currOff, roundHalf(vec4(rl, 0.0, hd, rl)));
         imageStore(scratchImg,  px,           roundHalf(vec4(raw, rawTap.a)));
         return;
     }
@@ -273,12 +314,12 @@ void main() {
     }
     float currLuma = luma(curr);
 
-    // Gather stabilized hitDist + rank-2 outlier-safe 9-sample moments (m1, sigma) for anti-ghosting & disocclusion.
+    // Gather outlier-proof median hitDist + interquartile spread + 9-sample spatial moments.
     vec3 locM1, locSigma;
-    float smoothHitDist;
+    float smoothHitDist, distSpread;
     int locCount;
     gatherTracedSpecStats(px, res, isTraced, useChecker, curr, isTraced ? rawTap.a : filledTap.a,
-                          geoNormal, shadeNormal, depth, locM1, locSigma, smoothHitDist, locCount);
+                          geoNormal, shadeNormal, depth, locM1, locSigma, smoothHitDist, distSpread, locCount);
 
     // Previous-frame surface plane for exact 3D plane-distance verification.
     vec3 prevWorldPos = worldPos + cameraVelocity;
@@ -286,88 +327,127 @@ void main() {
     vec3 prevViewGeoN = normalize(mat3(gbufferPreviousModelView) * geoNormal);
     float planeTol = max(0.06, 0.025 * max(-prevSurfView.z, 0.1));
 
-    // Planar virtual reflection reprojection is ONLY geometrically valid on flat, smooth mirrors
-    // (dot(shadeNormal, geoNormal) ≈ 1 and roughness < 0.25). On normal-mapped/bumpy surfaces (e.g.
-    // striped iron blocks) or rough surfaces, the reflection is anchored to per-texel shadeNormal ->
-    // use exact surface reprojection (surfPrevUV) so history NEVER slides across blocks as a double image!
     vec3 eyeToSurf = mat3(gbufferModelViewInverse) * viewPos;
-    vec3 viewRay   = normalize(eyeToSurf);
-    float flatness = smoothstep(0.985, 0.998, dot(shadeNormal, geoNormal));
-    float domFactor = smoothstep(0.25, 0.08, roughness) * flatness;
+    float camDist  = length(eyeToSurf);
+    vec3 viewRay   = eyeToSurf / max(camDist, 1e-4);
+    bool canVirtual = (smoothHitDist > 0.05);
 
     vec3 oldSlow = vec3(0.0);
-    vec2 oldMom  = vec2(0.0);
+    vec4 oldMom  = vec4(0.0); // (meanLuma, stdDev, prevHitDist, fastLuma)
     float oldAge = 0.0;
     float support = 0.0;
+    bool usedVirtual = false;
+    float parallaxPx = 0.0;
 
     if (frameCounter > 1) {
         vec2 prevJitter = getPrevTaaJitter();
-        if (domFactor > 0.01) {
-            vec3 virtualPos = worldPos + viewRay * (smoothHitDist * domFactor);
+        vec2 surfPrevUV = reprojectScreenUV(uv, worldPos);
+
+        if (canVirtual) {
+            vec3 virtualPos = worldPos + viewRay * smoothHitDist;
             vec2 virtPrevUV = reprojectScreenUV(uv, virtualPos);
+            if (surfPrevUV.x >= 0.0 && virtPrevUV.x >= 0.0) {
+                parallaxPx = length((virtPrevUV - surfPrevUV) * vec2(res));
+            }
+            // During real reflection parallax (>0.35px), enforce physical reflection-space hitDist
+            // continuity to detect foreground/background disocclusions on the exact same floor plane!
+            // Also require shadeNormal similarity (>=0.85) so tilted tile bevel grooves never bleed onto flat tiles.
+            bool checkHitDist = (parallaxPx > 0.35);
+            float hitDistTol = max(0.50, 0.45 * smoothHitDist) + 1.5 * distSpread + length(cameraVelocity) * 2.0;
             support = fetchPrevSpecHistory(virtPrevUV, res, prevOff, prevJitter, prevSurfView, prevViewGeoN,
-                                           geoNormal, shadeNormal, roughness, planeTol, false, oldSlow, oldMom, oldAge);
+                                           geoNormal, shadeNormal, planeTol, 0.85,
+                                           checkHitDist, smoothHitDist, hitDistTol, false, oldSlow, oldMom, oldAge);
+            usedVirtual = (support > 1e-4);
         }
-        if (support <= 1e-4) {
-            vec2 surfPrevUV = reprojectScreenUV(uv, worldPos);
-            support = fetchPrevSpecHistory(surfPrevUV, res, prevOff, prevJitter, prevSurfView, prevViewGeoN,
-                                           geoNormal, shadeNormal, roughness, planeTol, true, oldSlow, oldMom, oldAge);
+
+        if (!usedVirtual) {
+            vec3 surfSlow;
+            vec4 surfMom;
+            float surfAge;
+            float surfSup = fetchPrevSpecHistory(surfPrevUV, res, prevOff, prevJitter, prevSurfView, prevViewGeoN,
+                                                 geoNormal, shadeNormal, planeTol, 0.80,
+                                                 false, smoothHitDist, 0.0, true, surfSlow, surfMom, surfAge);
+            if (surfSup > 1e-4) {
+                // If virtual parallax shifted the reflection (>0.25px) and virtual lookup missed
+                // (e.g., reflection-space disocclusion or edge of reflector), reset cleanly instead
+                // of dragging surface-locked history across the floor!
+                bool reflDisoccluded = canVirtual && (parallaxPx > 0.25);
+                if (!reflDisoccluded) {
+                    oldSlow = surfSlow; oldMom = surfMom; oldAge = surfAge; support = surfSup;
+                }
+            }
         }
     }
 
-    // Cumulative GGX reflected-lobe angular drift bound: N * dTheta_per_sample <= 3.5 * roughness^2.
-    // Automatically scales with FPS, camera distance, roughness, and checkerboard sample interval
-    // without wiping out history on close-up iron bars / railings!
+    // Exact geometric multi-depth parallax pixel-error bound (roughness-agnostic, FPS-independent!):
+    // - Static camera (parallaxPx == 0, sinParallax == 0): full SPECULAR_MAX_HISTORY (zero noise!).
+    // - Moving camera on single-depth reflection (distSpread ≈ 0): virtual reprojection is exact -> full smooth history!
+    // - Moving camera on multi-depth reflection (e.g. door + wall + ceiling inside one GGX cone):
+    //   near and far layers slide at different screen velocities -> cap history by exact pixel mismatch!
     vec3 currV = -viewRay;
     vec3 prevEyePos = -transpose(mat3(gbufferPreviousModelView)) * gbufferPreviousModelView[3].xyz;
     vec3 prevV = normalize(prevEyePos - prevWorldPos);
     float cosParallax = saturate(dot(currV, prevV));
     float sinParallax = sqrt(max(0.0, 1.0 - cosParallax * cosParallax));
     float sampleInterval = useChecker ? 2.0 : 1.0;
-    float dThetaPerSample = sinParallax * sampleInterval;
-    float ggxAlpha = max(roughness * roughness, 0.006);
-    float maxHist = clamp((3.5 * ggxAlpha) / max(dThetaPerSample, 1e-5), 2.5, SPECULAR_MAX_HISTORY);
+
+    float spreadRatio = clamp(distSpread / max(smoothHitDist, 0.25), 0.0, 2.0);
+    float parallaxErrPx = parallaxPx * sampleInterval * (0.12 + 0.85 * spreadRatio);
+    float viewDriftErr  = sinParallax * sampleInterval * 12.0;
+    float totalMotionErr = max(parallaxErrPx, viewDriftErr);
+    float maxHist = clamp(1.5 / max(totalMotionErr, 1e-4), 1.5, SPECULAR_MAX_HISTORY);
     oldAge = min(oldAge, maxHist);
 
-    // Statistical temporal-vs-spatial consistency guard (camera-motion-independent):
-    // Compares reprojected history against the current 9-sample spatial mean (locM1) using BOTH
-    // spatial stdDev (locSigma) and accumulated temporal stdDev (prevTempSigma).
-    // - Static noisy GGX reflections (high prevTempSigma) remain 100% inside the envelope (zero sample drop!).
-    // - Moving/sliding reflections & dynamic toggling lights (e.g. redstone repeaters/lamps) fall outside
-    //   the envelope even when camera parallax is zero -> clamped immediately with proportional age reset!
-    if (support > 1e-4 && locCount >= 4) {
-        float prevTempSigma = sqrt(max(oldMom.y - oldMom.x * oldMom.x, 0.0));
-        float parallaxTighten = mix(1.0, 0.65, saturate(dThetaPerSample / ggxAlpha));
-        vec3 clampExtent = max(max(locSigma * 2.0, vec3(prevTempSigma * 1.5)), vec3(0.04)) * parallaxTighten;
+    // Dual-EMA dynamic-reflection response (3.5-sigma guard keeps static multi-light reflections rock-solid
+    // while adapting smoothly to dynamic light changes and opened doors!).
+    float oldMeanL = oldMom.r;
+    float oldStd   = oldMom.g;
+    float oldHitD  = (oldMom.b > 0.02) ? oldMom.b : smoothHitDist;
+    float oldFastL = oldMom.a;
 
-        vec3 clamped = clamp(oldSlow, max(locM1 - clampExtent, vec3(0.0)), locM1 + clampExtent);
-        vec3 excess = abs(oldSlow - clamped);
-        float excessRatio = maxOf(excess / max(clampExtent, vec3(0.04)));
+    float sampleLuma = isTraced ? currLuma : ((locCount >= 2) ? luma(locM1) : luma(filledTap.rgb));
+    const float specFastWindow = 8.0;
+    float fastAlpha = 1.0 / min(max(oldAge + 1.0, 1.0), specFastWindow);
+    float fastLuma  = (support > 1e-4) ? mix(oldFastL, sampleLuma, fastAlpha) : sampleLuma;
 
-        if (excessRatio > 0.01) {
-            float pullW = smoothstep(0.0, 1.5, excessRatio);
-            oldSlow = mix(oldSlow, clamped, pullW);
-            oldAge  = mix(oldAge, min(oldAge, 3.0), pullW);
-            float cl = luma(oldSlow);
-            float sl = luma(locSigma);
-            oldMom = mix(oldMom, vec2(cl, cl * cl + sl * sl), pullW);
+    if (support > 1e-4 && oldAge > specFastWindow) {
+        float fastErr = oldStd * inversesqrt(2.0 * specFastWindow - 1.0);
+        float diff = abs(fastLuma - oldMeanL);
+        float noiseFloor = 3.5 * fastErr + 0.06;
+        float relChange = diff / max(max(fastLuma, oldMeanL), noiseFloor);
+        float sigRatio  = diff / max(noiseFloor, 1e-4);
+        float resp = smoothstep(0.45, 0.80, relChange) * smoothstep(1.0, 2.0, sigRatio);
+        if (resp > 0.01) {
+            oldAge = mix(oldAge, min(oldAge, 3.0), resp);
         }
     }
 
     if (!isTraced) {
         if (support > 1e-4) {
-            float tempStdDev = sqrt(max(oldMom.y - oldMom.x * oldMom.x, 0.0));
-            float spatStdDev = (locCount >= 2) ? luma(locSigma) : max(0.25 * luma(oldSlow), 0.05);
-            float stdDev = (oldAge < 4.0) ? max(tempStdDev, spatStdDev * (2.0 / max(oldAge, 1.0))) : tempStdDev;
-            imageStore(specHistImg, px + currOff, roundHalf(vec4(oldSlow, oldAge)));
-            imageStore(specMomImg,  px + currOff, vec4(oldMom, 0.0, 0.0));
-            imageStore(scratchImg,  px,           roundHalf(vec4(oldSlow, stdDev)));
+            vec3 outCol = oldSlow;
+            float outA  = oldAge;
+            vec4 outMom = vec4(oldMeanL, oldStd, oldHitD, fastLuma);
+            if ((parallaxPx > 0.15 || sinParallax > 1e-4) && locCount >= 2) {
+                float uAge   = min(maxHist, oldAge + 1.0);
+                float uAlpha = 1.0 / max(uAge, 1.0);
+                outCol = mix(oldSlow, locM1, uAlpha);
+                outA   = uAge;
+                float uMean = mix(oldMeanL, luma(locM1), uAlpha);
+                float uVar  = mix(oldStd * oldStd, (luma(locM1) - uMean) * (luma(locM1) - uMean), max(uAlpha, 0.15));
+                float uHitD = mix(oldHitD, smoothHitDist, max(uAlpha, 0.25));
+                outMom = vec4(uMean, sqrt(max(uVar, 0.0)), clamp(uHitD, 0.0, 128.0), fastLuma);
+            }
+            float spatStdDev = (locCount >= 2) ? luma(locSigma) : max(0.25 * luma(outCol), 0.05);
+            float stdDev = mix(spatStdDev, outMom.g, smoothstep(1.0, 6.0, outA));
+            imageStore(specHistImg, px + currOff, roundHalf(vec4(outCol, outA)));
+            imageStore(specMomImg,  px + currOff, roundHalf(outMom));
+            imageStore(scratchImg,  px,           roundHalf(vec4(outCol, stdDev)));
         } else {
             vec3 initCol = (locCount >= 2) ? locM1 : filledTap.rgb;
             float fl = luma(initCol);
-            float stdDev = (locCount >= 2) ? max(luma(locSigma) * 2.0, 0.15 * fl) : max(0.25 * fl, 0.05);
+            float stdDev = (locCount >= 2) ? max(luma(locSigma), 0.10 * fl) : max(0.20 * fl, 0.04);
             imageStore(specHistImg, px + currOff, roundHalf(vec4(initCol, 0.5)));
-            imageStore(specMomImg,  px + currOff, vec4(fl, fl * fl, 0.0, 0.0));
+            imageStore(specMomImg,  px + currOff, roundHalf(vec4(fl, stdDev, clamp(smoothHitDist, 0.0, 128.0), fl)));
             imageStore(scratchImg,  px,           roundHalf(vec4(initCol, stdDev)));
         }
         return;
@@ -376,33 +456,37 @@ void main() {
     float age = min(maxHist, oldAge + 1.0);
     float alpha = 1.0 / max(age, 1.0);
     vec3 safeCurr = curr;
-    if (support > 1e-4 && oldAge >= 2.0) {
-        float refLuma = max(luma(oldSlow), luma(locM1));
+    if (support > 1e-4 && oldAge >= 3.0) {
+        float refLuma = max(max(luma(oldSlow), luma(locM1)), fastLuma);
         float maxSpecLuma = max(refLuma * 4.5 + 0.4, 1.0);
         if (currLuma > maxSpecLuma) {
             safeCurr *= maxSpecLuma / max(currLuma, 1e-6);
         }
     }
 
-    // Textbook SVGF disocclusion initialization (Schied 2017, Sec. 4.2) using unbiased outlier-safe local mean:
-    // Preserves true glossy highlight brightness while rejecting isolated single-pixel HDR fireflies!
     vec3 integrated;
-    vec2 moments;
+    vec4 outMom;
     if (support <= 1e-4) {
-        integrated = (locCount >= 3) ? locM1 : safeCurr;
+        // Blend lightly with locM1 only on rough disoccluded pixels to suppress 1-SPP sparkle
+        // without creating a pre-blurred rectangular screen-window border during camera rotation.
+        integrated = (roughness >= 0.16 && locCount >= 3) ? mix(safeCurr, locM1, 0.5) : safeCurr;
         float initLuma = luma(integrated);
-        moments = vec2(initLuma, initLuma * initLuma);
+        float initStd  = (locCount >= 3) ? luma(locSigma) : max(0.20 * initLuma, 0.04);
+        outMom = vec4(initLuma, initStd, clamp(smoothHitDist, 0.0, 128.0), initLuma);
     } else {
         float safeLuma = luma(safeCurr);
-        moments = mix(oldMom, vec2(safeLuma, safeLuma * safeLuma), alpha);
         integrated = mix(oldSlow, safeCurr, alpha);
+        float newMean = mix(oldMeanL, safeLuma, alpha);
+        float varAlpha = max(alpha, 1.0 / 16.0);
+        float newVar  = mix(oldStd * oldStd, (safeLuma - newMean) * (safeLuma - newMean), varAlpha);
+        float newHitD = mix(oldHitD, smoothHitDist, max(alpha, 0.25));
+        outMom = vec4(newMean, sqrt(max(newVar, 0.0)), clamp(newHitD, 0.0, 128.0), fastLuma);
     }
 
-    float tempStdDev = sqrt(max(moments.y - moments.x * moments.x, 0.0));
-    float spatStdDev = (locCount >= 3) ? luma(locSigma) : max(0.25 * luma(integrated), 0.05);
-    float stdDev = (age < 4.0) ? max(tempStdDev, spatStdDev * (2.0 / max(age, 1.0))) : tempStdDev;
+    float spatStdDev = (locCount >= 3) ? luma(locSigma) : max(0.20 * luma(integrated), 0.04);
+    float stdDev = mix(spatStdDev, outMom.g, smoothstep(1.0, 6.0, age));
 
     imageStore(specHistImg, px + currOff, roundHalf(vec4(integrated, age)));
-    imageStore(specMomImg,  px + currOff, vec4(moments, 0.0, 0.0));
+    imageStore(specMomImg,  px + currOff, roundHalf(outMom));
     imageStore(scratchImg,  px,           roundHalf(vec4(integrated, stdDev)));
 }

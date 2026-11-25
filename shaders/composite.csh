@@ -24,6 +24,7 @@ const float TAA_ANTIFLICKER = 0.25;
 // plus true submerged underwater volume fog when camera is inside water (without double-fogging Snell's window!).
 vec3 fetchSceneColor(ivec2 q, ivec2 res, vec3 uwLightDir, vec3 uwDirectCol, vec3 uwSkyUp) {
     vec3 bg = texelFetch(colortex0, q, 0).rgb;
+    #if DEBUG_VIEW == 0
     vec3 T  = texelFetch(colortex7, q, 0).rgb;
     vec3 L  = texelFetch(colortex6, q, 0).rgb;
     if (minOf(T) < 0.9999 || maxOf(L) > 0.0) {
@@ -54,6 +55,7 @@ vec3 fetchSceneColor(ivec2 q, ivec2 res, vec3 uwLightDir, vec3 uwDirectCol, vec3
                         vec3(1.0), uwSkyUp, 1.0, vec3(0.20, 0.55, 0.85), true, Tvol, inscatter);
         bg = bg * Tvol + inscatter;
     }
+    #endif
     bg = max(bg, vec3(0.0));
     if (any(isnan(bg)) || any(isinf(bg))) bg = vec3(0.0);
     return bg;
