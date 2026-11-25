@@ -14,13 +14,13 @@ layout(rgba16f) uniform writeonly image2D colorimg5;
 layout(rgba32f) uniform writeonly image2D prevGuideImg;
 
 vec3 evalHeldLightColor(int itemId) {
-    if (itemId == 20001) return vec3(0.24, 0.82, 1.00); // Soul fire
-    if (itemId == 20002) return vec3(0.68, 0.94, 1.00); // Sea lantern / beacon
-    if (itemId == 20003) return vec3(1.00, 0.16, 0.08); // Redstone
-    if (itemId == 20004) return vec3(1.00, 0.90, 0.72); // End rod / glowstone
-    if (itemId == 20005) return vec3(0.76, 0.36, 1.00); // Amethyst / arcane
-    if (itemId == 20006) return vec3(0.45, 1.00, 0.56); // Verdant froglight
-    return vec3(1.00, 0.62, 0.26);                      // Torch / lantern / lava default
+    if (itemId == 20001) return vec3(0.38, 0.94, 1.00); // Soul fire
+    if (itemId == 20002) return vec3(0.74, 0.95, 1.00); // Sea lantern / beacon
+    if (itemId == 20003) return vec3(1.00, 0.24, 0.20); // Redstone
+    if (itemId == 20004) return vec3(1.00, 0.91, 0.78); // End rod / glowstone
+    if (itemId == 20005) return vec3(0.78, 0.40, 1.00); // Amethyst / arcane
+    if (itemId == 20006) return vec3(0.52, 1.00, 0.60); // Verdant froglight
+    return vec3(1.00, 0.55, 0.11);                      // Torch / lantern / lava default (matches placed flame!)
 }
 
 // Perspective-exact clip-space depth contact shadow for held-item dynamic lights:

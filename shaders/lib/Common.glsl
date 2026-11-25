@@ -39,10 +39,10 @@ vec3 evalGlassTransmittance(vec3 srgbCol, float alpha) {
     return mix(vec3(1.0), deepTint, tintStrength);
 }
 
-// Vibrant hue-accurate emissive color for colored light sources (torches, soul fire, redstone,
+// Physically faithful emissive color for colored light sources (torches, soul fire, redstone,
 // froglights, sea lanterns, amethyst, crying obsidian, modded colored lamps).
-// Masks dark non-emissive parts (lantern iron cages, torch sticks, ore stone) on vanilla emitters
-// while leaving LabPBR per-texel emission maps untouched.
+// Preserves exact linear texture chromaticity (matching both the emissive block's own glow and
+// handheld lights) while masking dark non-emissive frames/sticks on vanilla emitters.
 vec3 evalEmitterColor(vec3 albedoLinear, float blockEmit, float pbrEmit, out float emitStrength) {
     float maxC = maxOf(albedoLinear);
     float mask = (pbrEmit > 0.0) ? 1.0 : smoothstep(0.12, 0.42, maxC);
@@ -52,11 +52,11 @@ vec3 evalEmitterColor(vec3 albedoLinear, float blockEmit, float pbrEmit, out flo
         return vec3(0.0);
     }
     vec3 chroma = saturate(albedoLinear / maxC);
-    vec3 richChroma = pow(chroma, vec3(1.55));
-    float lumBase = max(luma(albedoLinear), 0.15 * maxC);
-    float lumRich = max(luma(richChroma), 0.12);
-    float energy = mix(maxC, lumBase / lumRich, 0.35);
-    return richChroma * clamp(energy, 0.25, 1.35);
+    // Subtle 6% spectral breadth prevents pure-zero channels (e.g. b=0 in sRGB torch textures)
+    // from crushing opposite-hue surfaces to pitch black under warm firelight.
+    vec3 naturalChroma = mix(chroma, vec3(1.0), 0.06);
+    float energy = clamp(maxC, 0.30, 1.25);
+    return naturalChroma * energy;
 }
 
 // ---- True Spatiotemporal Blue Noise (Heitz 2019: 16x16 Bayer-Ranked 2D Sobol + Stride-1 Temporal R2) ----

@@ -59,12 +59,20 @@ void main() {
             return;
         }
 
-        // 2) Track 2 non-cube emitters (torches, lanterns, candles, end rods)
+        // 2) Track 2 non-cube emitters (torches, lanterns, candles, end rods):
+        // Sample 4 barycentric points per emissive triangle and average the hottest core texels
+        // so tall thin meshes (like torch sticks + tiny top flame) always extract the true flame color & centroid!
         uint primIdx = sv.primHead;
-        float bestScore = 0.0;
-        float bestStr   = 0.0;
-        vec3  bestCol   = vec3(0.0);
-        vec3  bestPos   = vec3(v) + 0.5;
+        vec3  sumCol  = vec3(0.0);
+        vec3  sumPos  = vec3(0.0);
+        float sumW    = 0.0;
+        float bestStr = 0.0;
+        const vec3 baryPts[4] = vec3[4](
+            vec3(0.3333, 0.3333, 0.3334),
+            vec3(0.6666, 0.1667, 0.1667),
+            vec3(0.1667, 0.6666, 0.1667),
+            vec3(0.1667, 0.1667, 0.6666)
+        );
         for (int guard = 0; guard < 160 && primIdx != PRIM_END; ++guard) {
             ScenePrim pr = primPool.prims[primIdx];
             uint nextIdx = pr.meta.x;
@@ -76,23 +84,28 @@ void main() {
                 bool primTrans;
                 uint dummyNext;
                 unpackScenePrim(pr, p0, e1, e2, uv0, uv1, uv2, tintSrgb, primEmit, primTrans, dummyNext);
-                vec2 midUV = (uv0 + uv1 + uv2) * (1.0 / 3.0);
-                vec4 tex = textureLod(colortex14, midUV, 0.0);
-                if (tex.a >= 0.1) {
+                for (int s = 0; s < 4; ++s) {
+                    vec3 b = baryPts[s];
+                    vec2 sUV = uv0 * b.x + uv1 * b.y + uv2 * b.z;
+                    vec4 tex = textureLod(colortex14, sUV, 0.0);
+                    if (tex.a < 0.1) continue;
                     vec3 albLin = srgbToLinear(tex.rgb * tintSrgb);
+                    float maxAlb = maxOf(albLin);
+                    if (maxAlb < 0.25) continue;
                     float emitStr = 0.0;
                     vec3 emitCol = evalEmitterColor(albLin, primEmit, 0.0, emitStr);
-                    float score = emitStr * maxOf(albLin);
-                    if (score > bestScore) {
-                        bestScore = score;
-                        bestStr   = emitStr;
-                        bestCol   = emitCol;
-                        bestPos   = vec3(v) + clamp(p0 + (e1 + e2) * (1.0 / 3.0), vec3(0.05), vec3(0.95));
-                    }
+                    float w = emitStr * maxAlb * maxAlb;
+                    vec3 sPos = vec3(v) + clamp(p0 + e1 * b.y + e2 * b.z, vec3(0.05), vec3(0.95));
+                    sumCol += emitCol * w;
+                    sumPos += sPos * w;
+                    sumW   += w;
+                    bestStr = max(bestStr, emitStr);
                 }
             }
             primIdx = nextIdx;
         }
+        vec3 bestCol = (sumW > 1e-5) ? (sumCol / sumW) : vec3(1.0, 0.55, 0.11);
+        vec3 bestPos = (sumW > 1e-5) ? (sumPos / sumW) : (vec3(v) + 0.5);
         lightList.lights[idx].posAndPower  = vec4(bestPos, bestStr);
         lightList.lights[idx].colorAndMeta = vec4(bestCol, 0.18);
         if (bestStr > 1e-4) {
