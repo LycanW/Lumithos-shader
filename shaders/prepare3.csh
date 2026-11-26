@@ -5,7 +5,7 @@
 // - Auto-GCs stale slots (> SC_STALE_FRAMES) to keep bucket load factor < 15% everywhere.
 // - Traces strictly 1 SPP cosine-weighted hemisphere + exact face-normal Local-Grid RIS NEE
 //   (2x higher sample efficiency than omni-directional air probes, zero wall-backside leaks!).
-#include "/lib/Raytrace.glsl"
+#include "/lib/EmitterSampling.glsl"
 #include "/lib/SkyShadow.glsl"
 #include "/lib/RadianceCache.glsl"
 
@@ -100,7 +100,8 @@ void main() {
 
     // 1) 1-SPP Local-Grid RIS NEE using exact surface faceNormal (not crude 0.25 spherical average!).
     vec3 neeDir = faceNormal;
-    vec3 neeRad = useNEE ? sampleDirectLightsNEE(rayOrig, faceNormal, false, 24, uNee3.xy, neeDir) : vec3(0.0);
+    vec2 surfaceRandom = stbn3D(modCell, updateSeq, faceIdx + 18u).xy;
+    vec3 neeRad = useNEE ? sampleDirectLightsNEE(rayOrig, faceNormal, 24, uNee3.xy, surfaceRandom, neeDir) : vec3(0.0);
     neeRad = min(max(neeRad, vec3(0.0)), vec3(16.0));
     if (any(isnan(neeRad)) || any(isinf(neeRad))) neeRad = vec3(0.0);
 

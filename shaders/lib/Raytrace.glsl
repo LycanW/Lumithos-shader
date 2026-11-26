@@ -1,7 +1,7 @@
 #ifndef LIB_RAYTRACE_GLSL
 #define LIB_RAYTRACE_GLSL
 
-#include "/lib/SceneGeo.glsl"
+#include "/lib/EmitterGeometry.glsl"
 
 struct TraceHit {
     bool  hit;
@@ -74,27 +74,61 @@ vec3 secondaryHitLighting(TraceHit hit, vec3 rayDir, vec3 lightDir, vec3 direct,
     return reflected;
 }
 
-float sceneLightRange(float strength) {
-    return clamp(strength * 16.0, 4.0, 16.0);
+float localLightWindow(float dist2, float strength) {
+    float reach = clamp(strength * 16.0, 4.0, 16.0);
+    float r2 = dist2 / (reach * reach);
+    float window = max(1.0 - r2 * r2, 0.0);
+    return window * window;
 }
 
-// NEE owns emission only when this emitter is actually selectable from the receiver.
-bool directLightCovers(ivec3 voxel, vec3 receiver, vec3 normal) {
-    if (!inVoxelBounds(voxel)) return false;
+float emitterHorizonExtent(vec3 normal) {
+    return 0.5 * dot(abs(normal), vec3(1.0));
+}
+
+float sampledEmitterShare(ivec3 voxel, vec3 receiver, vec3 normal, out uvec2 shape) {
+    shape = uvec2(0u);
+    if (!inVoxelBounds(voxel) || !inVoxelBounds(ivec3(floor(receiver)))) return 0.0;
+    if (dot(vec3(voxel) + 0.5 - receiver, normal) + emitterHorizonExtent(normal) <= 0.0) return 0.0;
+
+    uint slot = surfacePool.surfaces[voxelLinearIndex(voxel)].primHead >> 21u;
+    if (slot == 0u || slot > LIGHT_CELL_CAP) return 0.0;
     ivec3 cell = voxel / 32;
     uint id = uint(cell.x + LIGHT_CELL_XZ * (cell.z + LIGHT_CELL_XZ * cell.y));
-    uint slot = surfacePool.surfaces[voxelLinearIndex(voxel)].primHead >> 21u;
-    if (slot == 0u) return false;
-    vec4 lamp = lightList.lights[lightList.cellLights[id * LIGHT_CELL_CAP + slot - 1u]].posAndPower;
-    vec3 delta = lamp.xyz - worldToVoxelPos(receiver);
-    float reach = sceneLightRange(lamp.w);
-    float dist2 = dot(delta, delta);
-    return dist2 < reach * reach && dot(delta, normal) > 1e-4 * sqrt(max(dist2, 1e-6));
+    uint index = lightList.cellLights[id * LIGHT_CELL_CAP + slot - 1u];
+    shape = emitterGeometry.shapes[index];
+    if ((shape.x & EMITTER_CUBE) != 0u) {
+        shape.x = EMITTER_CUBE | frontEmitterFaces(shape.x, receiver - vec3(voxel));
+    }
+    if ((shape.x & ~EMITTER_CUBE) == 0u) return 0.0;
+
+    vec4 lamp = lightList.lights[index].posAndPower;
+    vec3 delta = lamp.xyz - receiver;
+    return localLightWindow(dot(delta, delta), lamp.w);
+}
+
+bool directLightCovers(ivec3 voxel, vec3 receiver, vec3 normal) {
+    uvec2 shape;
+    return sampledEmitterShare(voxel, worldToVoxelPos(receiver), normal, shape) > 0.0;
 }
 
 vec3 indirectHitEmission(TraceHit hit, vec3 receiver, vec3 normal) {
     float emission = surfaceEmission(hit.pbrEmission, hit.blockEmission * hit.coverage, hit.f0, hit.albedo);
-    if (emission <= 0.0 || (hit.blockEmission > 0.0 && directLightCovers(hit.voxel, receiver, normal))) return vec3(0.0);
+    if (emission <= 0.0) return vec3(0.0);
+
+    if (hit.blockEmission > 0.0) {
+        uvec2 shape;
+        float share = sampledEmitterShare(hit.voxel, worldToVoxelPos(receiver), normal, shape);
+        if (share > 0.0) {
+            bool cube = (shape.x & EMITTER_CUBE) != 0u;
+            if (hit.fromTrack2 && !cube) {
+                // The light table covers the primitive prefix searched by diffuse rays.
+                vec3 local = worldToVoxelPos(hit.worldPos) - vec3(hit.voxel);
+                if (inEmitterCell(local, hit.normal)) emission *= 1.0 - share;
+            } else if (!hit.fromTrack2 && cube && (shape.x & (1u << normalToFaceIndex(hit.normal))) != 0u) {
+                emission *= 1.0 - share;
+            }
+        }
+    }
     return hit.albedo * (emission * EMISSIVE_SCALE);
 }
 
@@ -430,17 +464,11 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod)
 }
 
 // Fast 6-connected hierarchical shadow/visibility ray with stained-glass colored transmission.
-// Returns vec3(0.0) if blocked by opaque geometry before reaching targetVoxel, or accumulated
-// colored glass transmittance if visible.
-vec3 traceVisibility(vec3 worldOrigin, vec3 targetVoxelPos, ivec3 targetVoxel, int maxSteps) {
-    vec3 vOrigin = worldToVoxelPos(worldOrigin);
+// Trace the open segment to the sampled emitter surface, including blockers inside its voxel.
+vec3 traceVisibility(vec3 vOrigin, vec3 rayDir, float distanceToLight) {
     ivec3 vCoord = ivec3(floor(vOrigin));
-    if (all(equal(vCoord, targetVoxel))) return vec3(1.0);
-
-    vec3 toTarget = targetVoxelPos - vOrigin;
-    float targetDist = length(toTarget);
-    if (targetDist < 0.05) return vec3(1.0);
-    vec3 rayDir = toTarget / targetDist;
+    // Exclude the sampled surface itself from the intersection tests at the ray endpoint.
+    float targetDist = distanceToLight - max(2e-5, distanceToLight * 1.2e-6);
 
     vec3 safeDir = vec3(
         abs(rayDir.x) < 1e-6 ? (rayDir.x < 0.0 ? -1e-6 : 1e-6) : rayDir.x,
@@ -462,9 +490,12 @@ vec3 traceVisibility(vec3 worldOrigin, vec3 targetVoxelPos, ivec3 targetVoxel, i
     int lastAxis = -1;
     vec3 throughput = vec3(1.0);
 
+    // Each iteration crosses at least one plane. A local light's proxy is at
+    // most 16 blocks away, and its sampled surface lies in the proxy's cell.
+    const int maxSteps = 34;
     for (int stepIdx = 0; stepIdx < maxSteps; ++stepIdx) {
-        if (!inVoxelBounds(vCoord) || tCur >= targetDist) return throughput;
-        if (all(equal(vCoord, targetVoxel))) return throughput;
+        if (!inVoxelBounds(vCoord)) return vec3(0.0);
+        if (tCur >= targetDist) return throughput;
 
         int shift = 0;
         if (texelFetch(superOccTex, vCoord >> 4, 0).r == 0u) {
@@ -487,7 +518,7 @@ vec3 traceVisibility(vec3 worldOrigin, vec3 targetVoxelPos, ivec3 targetVoxel, i
                     }
                 }
                 if (faceDesc != 0u) {
-                    vec3 localHit = (vOrigin + safeDir * tCur) - vec3(vCoord);
+                    vec3 localHit = (vOrigin + rayDir * tCur) - vec3(vCoord);
                     bool isTinted, isTranslucent;
                     float blockEmit;
                     vec2 atlasUV = decodeFaceAtlasUV(faceDesc, faceIdx, localHit, invAtlasSize, isTinted, isTranslucent, blockEmit);
@@ -512,14 +543,14 @@ vec3 traceVisibility(vec3 worldOrigin, vec3 targetVoxelPos, ivec3 targetVoxel, i
                 vec3 localOrig = vOrigin - vec3(vCoord);
                 bool hitTrans = false;
                 vec3 transFilter = vec3(1.0);
-                for (int guard = 0; guard < 32 && primIdx != PRIM_END; ++guard) {
+                for (int guard = 0; guard < 48 && primIdx != PRIM_END; ++guard) {
                     uint curIdx = primIdx;
                     vec3 p0, e1, e2;
                     uint nextIdx;
                     unpackScenePrimGeo(curIdx, p0, e1, e2, nextIdx);
                     primIdx = nextIdx;
 
-                    vec3 pvec = cross(safeDir, e2);
+                    vec3 pvec = cross(rayDir, e2);
                     float det = dot(e1, pvec);
                     if (abs(det) < 1e-7) continue;
                     float invDet = 1.0 / det;
@@ -529,11 +560,11 @@ vec3 traceVisibility(vec3 worldOrigin, vec3 targetVoxelPos, ivec3 targetVoxel, i
                     if (u < -1e-4 || u > 1.0001) continue;
 
                     vec3 qvec = cross(tvec, e1);
-                    float v = dot(safeDir, qvec) * invDet;
+                    float v = dot(rayDir, qvec) * invDet;
                     if (v < -1e-4 || u + v > 1.0001) continue;
 
                     float t = dot(e2, qvec) * invDet;
-                    if (t <= 1e-4 || t >= tLimit) continue;
+                    if (t <= 1e-4 || t < tCur - 1e-3 || t >= tLimit) continue;
 
                     vec2 uv0, uv1, uv2;
                     vec3 tintSrgb;
@@ -581,119 +612,13 @@ vec3 traceVisibility(vec3 worldOrigin, vec3 targetVoxelPos, ivec3 targetVoxel, i
 
         tCur = max(tCur, tNext);
         if (tCur >= targetDist) return throughput;
-        vec3 nextPos = vOrigin + safeDir * tCur;
+        vec3 nextPos = vOrigin + rayDir * tCur;
         ivec3 nextCoord = clamp(ivec3(floor(nextPos)), nodeMin, nodeMin + ivec3(nodeSize - 1));
         nextCoord[lastAxis] = nodeExit[lastAxis] + (stepSign[lastAxis] < 0 ? -1 : 0);
         vCoord = nextCoord;
     }
 
-    return throughput;
-}
-
-// 1-SPP Local-Grid RIS (Weighted Reservoir Sampling) Next-Event Estimation:
-// Queries ONLY the 2x2x2 local 32^3 macro-cells covering [vPos-16, vPos+16] (100% exact for Minecraft's
-// 16-block light radius!), eliminating global stepF = 150x fireflies in giant multi-chandelier halls!
-vec3 sampleDirectLightsNEE(vec3 worldPos, vec3 normal, bool isSphere, int maxCandidates, vec2 bn, out vec3 outLightDir) {
-    outLightDir = vec3(0.0, 1.0, 0.0);
-    if (lightList.lightCount == 0u) return vec3(0.0);
-
-    vec3 vPos = worldToVoxelPos(worldPos);
-    ivec3 c0 = ivec3(floor((vPos - 16.0) * (1.0 / 32.0)));
-
-    uint cIdxs[8];
-    uint cCounts[8];
-    uint localTotal = 0u;
-    int nCells = 0;
-
-    for (int dz = 0; dz < 2; ++dz) {
-        int cz = c0.z + dz;
-        if (cz < 0 || cz >= LIGHT_CELL_XZ) continue;
-        for (int dy = 0; dy < 2; ++dy) {
-            int cy = c0.y + dy;
-            if (cy < 0 || cy >= LIGHT_CELL_Y) continue;
-            for (int dx = 0; dx < 2; ++dx) {
-                int cx = c0.x + dx;
-                if (cx < 0 || cx >= LIGHT_CELL_XZ) continue;
-                uint ci = uint(cx + cz * LIGHT_CELL_XZ + cy * (LIGHT_CELL_XZ * LIGHT_CELL_XZ));
-                uint rawCnt = lightList.cellCount[ci];
-                if (rawCnt > 0u) {
-                    uint cnt = min(rawCnt, LIGHT_CELL_CAP);
-                    cIdxs[nCells]   = ci;
-                    cCounts[nCells] = cnt;
-                    localTotal += cnt;
-                    ++nCells;
-                }
-            }
-        }
-    }
-    if (localTotal == 0u) return vec3(0.0);
-
-    uint nCand = min(localTotal, uint(maxCandidates));
-    float stepF = float(localTotal) / float(nCand);
-    float startF = bn.x * stepF;
-
-    float wSum = 0.0;
-    float selW = 0.0;
-    vec3 selContrib = vec3(0.0);
-    vec3 selDir = vec3(0.0, 1.0, 0.0);
-    vec3 selTargetVoxPos = vec3(0.0);
-
-    for (uint i = 0u; i < nCand; ++i) {
-        uint target = uint(startF + float(i) * stepF) % localTotal;
-        uint idx = 0u;
-        uint rem = target;
-        for (int c = 0; c < nCells; ++c) {
-            if (rem < cCounts[c]) {
-                idx = lightList.cellLights[cIdxs[c] * LIGHT_CELL_CAP + rem];
-                break;
-            }
-            rem -= cCounts[c];
-        }
-
-        SceneLight L = lightList.lights[idx];
-        vec3 lWorld = voxelToWorldPos(L.posAndPower.xyz);
-        vec3 toL = lWorld - worldPos;
-        float dist2 = dot(toL, toL);
-        float emitStr = L.posAndPower.w;
-        float maxRange = sceneLightRange(emitStr);
-        if (dist2 >= maxRange * maxRange) continue;
-
-        float dist = sqrt(max(dist2, 1e-6));
-        vec3 lDir = toL / dist;
-        // Analytical spherical average of max(N.L, 0) over S^2 is exactly 0.25.
-        float geom = isSphere ? 0.25 : max(dot(normal, lDir), 0.0);
-        if (geom <= 1e-4) continue;
-
-        float rRatio = dist / maxRange;
-        float r2 = rRatio * rRatio;
-        float win = saturate(1.0 - r2 * r2);
-        win *= win;
-        float atten = win / (dist2 + 0.35);
-
-        // Projected-area calibration for the non-cube and full-cube light proxies.
-        float neePower = (L.colorAndMeta.a < 0.3) ? 1.55 : 1.35;
-        vec3 contrib = L.colorAndMeta.rgb * (emitStr * neePower * atten * geom);
-        float w = luma(contrib);
-        if (w <= 1e-6) continue;
-
-        wSum += w;
-        float uPick = fract(bn.y + 0.6180339887 * float(i));
-        if (uPick * wSum <= w) {
-            selW = w;
-            selContrib = contrib;
-            selDir = lDir;
-            selTargetVoxPos = L.posAndPower.xyz;
-        }
-    }
-
-    if (wSum <= 1e-6 || selW <= 1e-6) return vec3(0.0);
-
-    int visSteps = isSphere ? 36 : 24;
-    vec3 vis = traceVisibility(worldPos, selTargetVoxPos, ivec3(floor(selTargetVoxPos)), visSteps);
-    if (maxOf(vis) <= 1e-4) return vec3(0.0);
-
-    outLightDir = selDir;
-    return selContrib * ((stepF * wSum / selW) * vis);
+    return vec3(0.0);
 }
 
 #endif

@@ -1,7 +1,7 @@
 #version 430 compatibility
 
 // Resolve the material emission of the voxel lights registered by shadow.gsh and bin them for NEE.
-#include "/lib/SceneGeo.glsl"
+#include "/lib/EmitterGeometry.glsl"
 
 layout(local_size_x = 64) in;
 const ivec3 workGroups = ivec3(64, 1, 1); // 64 * 64 = 4,096 = MAX_SCENE_LIGHTS
@@ -31,6 +31,7 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     uint lCount = min(lightList.lightCount, MAX_SCENE_LIGHTS);
     if (idx < lCount) {
+        emitterGeometry.shapes[idx] = uvec2(0u);
         vec4 pAndP = lightList.lights[idx].posAndPower;
         ivec3 v = ivec3(floor(pAndP.xyz));
         if (!inVoxelBounds(v)) {
@@ -47,10 +48,12 @@ void main() {
         uint bestDesc = 0u;
         uint bestFace = 0u;
         uint bestEmit4 = 0u;
+        uint emittingFaces = 0u;
         for (uint f = 0u; f < 6u; ++f) {
             uint d = sv.face[f];
             if (d == 0u) continue;
             uint e4 = (d >> 27u) & 15u;
+            if (e4 > 0u) emittingFaces |= 1u << f;
             if (e4 > bestEmit4) {
                 bestEmit4 = e4;
                 bestDesc = d;
@@ -69,6 +72,7 @@ void main() {
             vec3 finalPos = vec3(v) + 0.5;
             lightList.lights[idx].posAndPower  = vec4(finalPos, emitStr);
             lightList.lights[idx].colorAndMeta = vec4(albLin, 0.5);
+            emitterGeometry.shapes[idx] = uvec2(EMITTER_CUBE | emittingFaces, 0u);
             binLight(v, sv.primHead, idx, emitStr, albLin);
             return;
         }
@@ -82,23 +86,32 @@ void main() {
         float sumW    = 0.0;
         float bestStr = 0.0;
         bool hasAuthored = false;
+        uint triangleCount = 0u;
+        float totalArea = 0.0;
         const vec3 baryPts[4] = vec3[4](
             vec3(0.3333, 0.3333, 0.3334),
             vec3(0.6666, 0.1667, 0.1667),
             vec3(0.1667, 0.6666, 0.1667),
             vec3(0.1667, 0.1667, 0.6666)
         );
-        for (int guard = 0; guard < 160 && primIdx != PRIM_END; ++guard) {
+        for (int guard = 0; guard < EMITTER_TRIANGLE_LIMIT && primIdx != PRIM_END; ++guard) {
             ScenePrim pr = primPool.prims[primIdx];
             uint nextIdx = pr.meta.x;
             uint e4 = (pr.meta.y >> 24u) & 15u;
-            if (e4 > 0u) {
+            if (e4 > 0u && (pr.meta.y & (1u << 29u)) == 0u) {
                 vec3 p0, e1, e2, tintSrgb;
                 vec2 uv0, uv1, uv2;
                 float primEmit;
                 bool primTrans;
                 uint dummyNext;
                 unpackScenePrim(pr, p0, e1, e2, uv0, uv1, uv2, tintSrgb, primEmit, primTrans, dummyNext);
+                float area = 0.5 * length(cross(e1, e2));
+                if (area > 0.0) {
+                    totalArea += area;
+                    uint entry = idx * EMITTER_TRIANGLE_LIMIT + triangleCount;
+                    emitterGeometry.triangles[entry] = uvec2(primIdx, floatBitsToUint(totalArea));
+                    ++triangleCount;
+                }
                 for (int s = 0; s < 4; ++s) {
                     vec3 b = baryPts[s];
                     vec2 sUV = uv0 * b.x + uv1 * b.y + uv2 * b.z;
@@ -129,6 +142,9 @@ void main() {
         vec3 bestPos = (sumW > 0.0) ? (sumPos / sumW) : (vec3(v) + 0.5);
         lightList.lights[idx].posAndPower  = vec4(bestPos, bestStr);
         lightList.lights[idx].colorAndMeta = vec4(bestCol, 0.18);
-        binLight(v, sv.primHead, idx, bestStr, bestCol);
+        if (triangleCount > 0u) {
+            emitterGeometry.shapes[idx] = uvec2(triangleCount, floatBitsToUint(totalArea));
+            binLight(v, sv.primHead, idx, bestStr, bestCol);
+        }
     }
 }

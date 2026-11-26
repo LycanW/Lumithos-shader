@@ -2,7 +2,7 @@
 
 // Pass: Dedicated Lightweight 1-SPP Direct Light NEE (RIS + Stained-Glass Visibility Ray)
 // Separated from deferred.csh to eliminate GRF register spilling on Xe-HPG; early-outs in ~0.00ms when no lights!
-#include "/lib/Raytrace.glsl"
+#include "/lib/EmitterSampling.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 #if DEBUG_VIEW == 1 || DIFFUSE_TRACE_RES == 2
@@ -60,7 +60,10 @@ void main() {
     vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, geoNormal, toCam, camDist);
 
     vec3 neeDir = vec3(0.0, 1.0, 0.0);
-    vec3 neeRad = sampleDirectLightsNEE(rayOrig, shadeNormal, false, 16, sampleBlueNoiseRG(bnPx + ivec2(0, 64), bnSeq), neeDir);
+    vec2 lightRandom = sampleBlueNoiseRG(bnPx + ivec2(0, 64), bnSeq);
+    // Use a separate blue-noise sequence for the point on the chosen emitter.
+    vec2 surfaceRandom = sampleBlueNoiseRG(bnPx + ivec2(47, 29), bnSeq + 137);
+    vec3 neeRad = sampleDirectLightsNEE(rayOrig, shadeNormal, 16, lightRandom, surfaceRandom, neeDir);
     if (any(isnan(neeRad)) || any(isinf(neeRad)) || maxOf(neeRad) <= 1e-5) return;
 
     vec4 prev = imageLoad(colorimg3, px);
