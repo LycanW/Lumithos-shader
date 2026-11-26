@@ -116,7 +116,7 @@ bool scIsSolidCubeBlock(ivec3 worldBlock) {
         ivec3 vPos = (worldBlock - cameraPositionInt) + ivec3(VOXEL_RES_XZ / 2, VOXEL_RES_Y / 2, VOXEL_RES_XZ / 2);
         if (!inVoxelBounds(vPos)) return false;
         if (texelFetch(voxelGridTex, vPos, 0).r == 0u) return false;
-        SurfaceVoxel sv = surfacePool.surfaces[voxelLinearIndex(vPos)];
+        SurfaceVoxel sv = readSurface(voxelLinearIndex(vPos));
         if (sv.primHead != PRIM_END) return false;
         uint anyFace = sv.face[0] | sv.face[1] | sv.face[2] | sv.face[3] | sv.face[4] | sv.face[5];
         if (anyFace == 0u) return false;
@@ -349,28 +349,32 @@ vec3 queryRadianceCacheSmooth(vec3 worldPos, vec3 normal, vec3 skyFallback, uint
 }
 
 // Native Surface-Hemisphere vMF Path Guiding lookup (reads 8-bit tangent-plane dominant direction + concentration).
-bool queryRCPathGuide(vec3 worldPos, vec3 normal, bool allowInsert, vec2 jitterRand, out vec3 guideDir, out float guideKappa, out float guideProb) {
+bool queryRCPathGuide(vec3 worldPos, vec3 normal, bool registerSurface, vec2 jitterRand, out vec3 guideDir, out float guideKappa, out float guideProb) {
     guideDir   = normal;
     guideKappa = 0.0;
     guideProb  = 0.0;
 
     #ifndef PATH_GUIDING
+        if (registerSurface) queryRadianceCache(worldPos, normal, 0u, true);
         return false;
     #endif
 
     uint lod = scSelectLod(worldPos);
     uint faceIdx = scNormalToFace(normal);
-    float cSize = scCellSize(lod);
+    vec3 queryPos = worldPos;
+    if (!registerSurface) {
+        float cSize = scCellSize(lod);
 
-    vec3 N, T, B;
-    scFaceBasis(faceIdx, N, T, B);
-    float phi = TWO_PI * jitterRand.x;
-    float r = 0.35 * cSize * sqrt(jitterRand.y);
-    vec3 jPos = worldPos + T * (r * cos(phi)) + B * (r * sin(phi));
+        vec3 N, T, B;
+        scFaceBasis(faceIdx, N, T, B);
+        float phi = TWO_PI * jitterRand.x;
+        float r = 0.35 * cSize * sqrt(jitterRand.y);
+        vec3 jPos = worldPos + T * (r * cos(phi)) + B * (r * sin(phi));
 
-    ivec3 baseBlock = cameraPositionInt + ivec3(floor(worldPos + cameraPositionFract + normal * (0.04 * cSize)));
-    ivec3 candBlock = cameraPositionInt + ivec3(floor(jPos + cameraPositionFract + normal * (0.04 * cSize)));
-    vec3 queryPos = scCellVisibleFromBase(baseBlock, candBlock, lod) ? jPos : worldPos;
+        ivec3 baseBlock = cameraPositionInt + ivec3(floor(worldPos + cameraPositionFract + normal * (0.04 * cSize)));
+        ivec3 candBlock = cameraPositionInt + ivec3(floor(jPos + cameraPositionFract + normal * (0.04 * cSize)));
+        if (scCellVisibleFromBase(baseBlock, candBlock, lod)) queryPos = jPos;
+    }
 
     ivec3 cell = scWorldCell(queryPos, normal, lod);
     uint key = scPackKey(cell, faceIdx, lod);
@@ -378,7 +382,7 @@ bool queryRCPathGuide(vec3 worldPos, vec3 normal, bool allowInsert, vec2 jitterR
     vec3 rad;
     uint accum, gUV;
     float gRho;
-    bool hit = scLookupSlot(key, allowInsert, allowInsert, rad, accum, gUV, gRho);
+    bool hit = scLookupSlot(key, registerSurface, registerSurface, rad, accum, gUV, gRho);
     if (hit && accum >= 10u && gRho > 0.14) {
         float conf = saturate((float(accum) - 6.0) / 24.0);
         float rho  = clamp(gRho * conf, 0.0, 0.85);

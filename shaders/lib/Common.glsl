@@ -39,26 +39,6 @@ vec3 evalGlassTransmittance(vec3 srgbCol, float alpha) {
     return mix(vec3(1.0), deepTint, tintStrength);
 }
 
-// Physically faithful emissive color for colored light sources (torches, soul fire, redstone,
-// froglights, sea lanterns, amethyst, crying obsidian, modded colored lamps).
-// Preserves exact linear texture chromaticity (matching both the emissive block's own glow and
-// handheld lights) while masking dark non-emissive frames/sticks on vanilla emitters.
-vec3 evalEmitterColor(vec3 albedoLinear, float blockEmit, float pbrEmit, out float emitStrength) {
-    float maxC = maxOf(albedoLinear);
-    float mask = (pbrEmit > 0.0) ? 1.0 : smoothstep(0.12, 0.42, maxC);
-    emitStrength = max(blockEmit * mask, pbrEmit);
-    if (emitStrength <= 1e-4 || maxC <= 1e-4) {
-        emitStrength = 0.0;
-        return vec3(0.0);
-    }
-    vec3 chroma = saturate(albedoLinear / maxC);
-    // Subtle 6% spectral breadth prevents pure-zero channels (e.g. b=0 in sRGB torch textures)
-    // from crushing opposite-hue surfaces to pitch black under warm firelight.
-    vec3 naturalChroma = mix(chroma, vec3(1.0), 0.06);
-    float energy = clamp(maxC, 0.30, 1.25);
-    return naturalChroma * energy;
-}
-
 // ---- True Spatiotemporal Blue Noise (Heitz 2019: 16x16 Bayer-Ranked 2D Sobol + Stride-1 Temporal R2) ----
 // - Zero 4x4 white-noise tile seams: exact recursive 16x16 blue-noise stratification (33x less LF energy!).
 // - Stride-1 R2 temporal rotation (never frame<<4!) preserves exact spatial blue noise on every frame
@@ -85,6 +65,17 @@ uint sobolDim1_8(uint k) {
     if ((k &  64u) != 0u) v ^= 0xAAu;
     if ((k & 128u) != 0u) v ^= 0xFFu;
     return v;
+}
+
+uniform sampler2D ggxBlueNoise;
+
+vec2 sampleBlueNoiseRG(ivec2 samplePx, int sampleIndex) {
+    // R2 translates the 128x128 tile between antithetic sample pairs.
+    uvec2 phase = (uint(sampleIndex) >> 1u) * uvec2(3242174889u, 2447445414u);
+    ivec2 cell = (samplePx + ivec2(phase >> 25u)) & 127;
+    vec2 xi = (texelFetch(ggxBlueNoise, cell, 0).rg * 255.0 + 0.5) / 256.0;
+    if ((sampleIndex & 1) != 0) xi = vec2(1.0 - xi.x, fract(xi.y + 0.5));
+    return xi;
 }
 
 vec2 stbn2D(ivec2 px, int frame, uint salt) {
@@ -240,6 +231,14 @@ float visSmithGGX(float NdotV, float NdotL, float alpha) {
     return 0.5 / max(vTerm + lTerm, 1e-5);
 }
 
+float directGGXLobe(float NdotV, float NdotL, float NdotH, float roughness) {
+    float alpha = max(roughness * roughness, 0.015);
+    float a2 = alpha * alpha;
+    float d = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    float D = min(a2 / max(PI * d * d, 1e-5), 256.0);
+    return D * visSmithGGX(NdotV, NdotL, alpha);
+}
+
 // Exact Heitz 2018 VNDF estimator geometric weight: G2(V, L) / G1(V)
 float smithGGX_G2OverG1(float NdotV, float NdotL, float alpha) {
     float a2 = alpha * alpha;
@@ -249,7 +248,7 @@ float smithGGX_G2OverG1(float NdotV, float NdotL, float alpha) {
 }
 
 // Analytical GGX split-sum DFG LUT (Lazarov 2013 / Karis):
-// Used for unbiased SVGF specular demodulation/remodulation and diffuse energy conservation.
+// Used for specular demodulation/remodulation and diffuse energy conservation.
 vec2 envBRDFScaleBias(float NdotV, float roughness) {
     const vec4 c0 = vec4(-1.0, -0.0275, -0.572,  0.022);
     const vec4 c1 = vec4( 1.0,  0.0425,  1.040, -0.040);

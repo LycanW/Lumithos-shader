@@ -11,7 +11,7 @@
 #define TOTAL_VOXELS 2457600u
 
 #define MAX_PRIMITIVES     1048576u
-#define PRIM_END           0xffffffffu
+#define PRIM_END           0x001fffffu // 21 low bits, above every valid primitive index
 #define MAX_SCENE_LIGHTS   4096u
 #define LIGHT_CELL_XZ      5
 #define LIGHT_CELL_Y       3
@@ -56,10 +56,7 @@
 #define SC_MAX_ACCUM_NEAR     48.0
 #define SC_MAX_ACCUM_MID      72.0
 #define SC_MAX_ACCUM_FAR      96.0
-#define DIFFUSE_MAX_HISTORY   96.0
-#define SPECULAR_MAX_HISTORY  32.0
 #define EMISSIVE_SCALE        3.5
-#define EMISSIVE_GI_SCALE     5.5
 #define SPECULAR_ROUGH_CUTOFF 0.65
 
 // ---- Shadow Map Constants ----

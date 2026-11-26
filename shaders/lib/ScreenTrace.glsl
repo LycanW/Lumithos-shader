@@ -1,7 +1,9 @@
 #ifndef LIB_SCREEN_TRACE_GLSL
 #define LIB_SCREEN_TRACE_GLSL
 
-#include "/lib/SVGF.glsl"
+#include "/lib/Reprojection.glsl"
+
+uniform sampler2D prevGuideTex;
 
 // Zero-thickness 3D plane-exact screen-space raytrace (SSR / SSRT) with seamless PT fallback:
 // - Rejects first-person hand pixels in depthtex1.
@@ -10,9 +12,10 @@
 // - Validates the 6-step refined hit directly against the pixel's 3D geometric surface plane
 //   (abs(dot(bRayView - bHitView, hitViewGeoN)) <= subpixel tolerance) + front-facing normal + strict collinearity;
 //   any miss falls back immediately to exact 3D voxel path-traced reflection!
-bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float dither, float minWorldDist, out vec2 prevHitUV, out float hitDist) {
+bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float dither, float minWorldDist, out vec2 prevHitUV, out float hitDist, out ivec3 hitVoxel) {
     prevHitUV = vec2(-1.0);
     hitDist = 0.0;
+    hitVoxel = ivec3(-1);
 
     vec3 viewDir = normalize(mat3(gbufferModelView) * worldDir);
     if (viewDir.z > 0.92) return false; // pointing back toward camera
@@ -110,6 +113,7 @@ bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float dither, f
                                     if (dot(hitGeoN, pGeoN) > 0.85) {
                                         prevHitUV = puv;
                                         hitDist = d;
+                                        hitVoxel = ivec3(floor(worldToVoxelPos(hitWorld - hitGeoN * 0.004)));
                                         return true;
                                     }
                                 }
@@ -124,6 +128,11 @@ bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float dither, f
         prevRayZ = rayLinZ;
     }
     return false;
+}
+
+bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float dither, float minWorldDist, out vec2 prevHitUV, out float hitDist) {
+    ivec3 unusedVoxel;
+    return screenSpaceTrace(viewOrigin, worldDir, steps, dither, minWorldDist, prevHitUV, hitDist, unusedVoxel);
 }
 
 #endif

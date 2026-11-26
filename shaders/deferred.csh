@@ -63,26 +63,22 @@ void main() {
     vec3 viewPos  = screenToView(vec3(uv, depth));
     vec3 worldPos = viewToWorld(viewPos);
 
-    // Query L1 SH Radiance Cache for primary-hit vMF path guiding (1/16 screen pixels allocate).
+    // Register each visible pixel's exact cache cell once per 16 frames.
+    // Lower frame bits have already selected the traced pixel in each tile.
+    #if DIFFUSE_MODE == 0
+        bool registerSurface = ((tid.x ^ (frameCounter >> 2)) & 1) == 0 && ((tid.y ^ (frameCounter >> 3)) & 1) == 0;
+    #elif DIFFUSE_MODE == 1
+        bool registerSurface = ((tid.x ^ (frameCounter >> 1)) & 3) == 0 && ((tid.y ^ (frameCounter >> 3)) & 1) == 0;
+    #else
+        bool registerSurface = ((px.x ^ frameCounter) & 3) == 0 && ((px.y ^ (frameCounter >> 2)) & 3) == 0;
+    #endif
+
     vec3 guideDir = shadeNormal;
     float guideKappa = 0.0;
     float guideProb = 0.0;
-    #if DIFFUSE_MODE == 0
-        bool allowAlloc = !isHand
-                       && (((tid.x ^ frameCounter) & 1) == 0)
-                       && (((tid.y ^ (frameCounter >> 1)) & 1) == 0);
-    #elif DIFFUSE_MODE == 1
-        bool allowAlloc = !isHand
-                       && (((tid.x ^ frameCounter) & 3) == 0)
-                       && (((tid.y ^ (frameCounter >> 2)) & 1) == 0);
-    #else
-        bool allowAlloc = !isHand
-                       && (((px.x ^ frameCounter) & 3) == 0)
-                       && (((px.y ^ (frameCounter >> 2)) & 3) == 0);
-    #endif
-    bool useGuide = !isHand && queryRCPathGuide(worldPos, geoNormal, allowAlloc, stbn2D(bnPx, bnSeq, 3u), guideDir, guideKappa, guideProb);
+    bool useGuide = queryRCPathGuide(worldPos, geoNormal, registerSurface, stbn2D(bnPx, bnSeq, 3u), guideDir, guideKappa, guideProb);
 
-    vec2 uDir = stbn2D(bnPx, bnSeq, 0u);
+    vec2 uDir = sampleBlueNoiseRG(bnPx + ivec2(64, 0), bnSeq);
     vec3 rayDir;
     if (useGuide && stbn2D(bnPx, bnSeq, 4u).x < guideProb) {
         rayDir = sampleVMF(guideDir, guideKappa, uDir);
@@ -100,8 +96,6 @@ void main() {
     float pdfMix = useGuide ? mix(pdfCos, pdfVMF(rayDir, guideDir, guideKappa), guideProb) : pdfCos;
     float weight = pdfCos / max(pdfMix, 1e-5);
 
-    bool useNEE = (lightList.lightCount > 0u);
-
     vec3 radiance = vec3(0.0);
     float hitDist = 64.0;
     bool ssrtHit = false;
@@ -110,11 +104,12 @@ void main() {
         if (!isHand && frameCounter > 1) {
             vec2 prevHitUV;
             float ssDist;
-            if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * geoNormal) * 0.04, rayDir, 8, stbn2D(bnPx, bnSeq, 9u).x, 0.25, prevHitUV, ssDist)) {
+            ivec3 hitVoxel;
+            if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * geoNormal) * 0.04, rayDir, 8, stbn2D(bnPx, bnSeq, 9u).x, 0.25, prevHitUV, ssDist, hitVoxel)) {
                 ivec2 hpx = clamp(ivec2(prevHitUV * screenSize()), ivec2(0), res - 1);
                 vec4 prevTap = texelFetch(colortex5, hpx, 0);
-                // Keep DIFFUSE_SSRT active on 99.9% of surfaces; only skip emissive pixels when NEE is active!
-                if ((!useNEE || prevTap.a < 0.01) && !any(isnan(prevTap.rgb)) && !any(isinf(prevTap.rgb))) {
+                if ((prevTap.a <= 0.0 || !directLightCovers(hitVoxel, worldPos, shadeNormal))
+                    && !any(isnan(prevTap.rgb)) && !any(isinf(prevTap.rgb))) {
                     radiance = min(max(prevTap.rgb, vec3(0.0)), vec3(16.0));
                     hitDist = ssDist;
                     ssrtHit = true;
@@ -131,19 +126,18 @@ void main() {
         TraceHit hit = traceScene(rayOrig, rayDir, DIFFUSE_MAX_STEPS, 1.0, true);
         if (hit.hit) {
             hitDist = hit.dist;
-            if (!useNEE || !hit.isBlockEmit) {
-                radiance += hit.emitColor * (hit.emission * EMISSIVE_GI_SCALE * hit.emitFluxScale);
-            }
+            radiance += indirectHitEmission(hit, rayOrig, shadeNormal);
 
             vec3 lightDir = getShadowLightDir();
             float NdotL = max(dot(hit.normal, lightDir), 0.0);
+            vec3 direct = vec3(0.0);
             if (NdotL > 0.0) {
                 vec3 vis = sampleShadowFastRay(hit.worldPos, hit.normal, rayDir);
-                radiance += hit.albedo * INV_PI * getDirectLightColor() * (NdotL * vis);
+                direct = getDirectLightColor() * (NdotL * vis);
             }
 
             vec3 bounce = queryRadianceCacheStochastic(hit.worldPos, hit.normal, 0u, stbn2D(bnPx, bnSeq, 5u));
-            radiance += hit.albedo * bounce * 0.85;
+            radiance += secondaryHitLighting(hit, rayDir, lightDir, direct, bounce, false);
             radiance *= hit.throughput;
         } else if (hit.exitedGrid) {
             radiance = evalSky(rayDir, false) * hit.throughput;

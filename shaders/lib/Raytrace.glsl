@@ -7,17 +7,17 @@ struct TraceHit {
     bool  hit;
     bool  exitedGrid;
     bool  fromTrack2;
-    bool  isBlockEmit;
     float dist;
     vec3  worldPos;
     vec3  normal;
     vec3  albedo;
-    vec3  emitColor;
     vec3  throughput;
     float roughness;
     float f0;
-    float emission;
-    float emitFluxScale;
+    float pbrEmission;
+    float blockEmission;
+    float coverage;
+    ivec3 voxel;
     float skyLight;
 };
 
@@ -26,26 +26,83 @@ TraceHit makeMissHit() {
     h.hit = false;
     h.exitedGrid = false;
     h.fromTrack2 = false;
-    h.isBlockEmit = false;
     h.dist = 1e6;
     h.worldPos = vec3(0.0);
     h.normal = vec3(0.0, 1.0, 0.0);
     h.albedo = vec3(0.0);
-    h.emitColor = vec3(0.0);
     h.throughput = vec3(1.0);
     h.roughness = 1.0;
     h.f0 = 0.04;
-    h.emission = 0.0;
-    h.emitFluxScale = 1.0;
+    h.pbrEmission = 0.0;
+    h.blockEmission = 0.0;
+    h.coverage = 1.0;
+    h.voxel = ivec3(-1);
     h.skyLight = 1.0;
     return h;
+}
+
+void readHitMaterial(inout TraceHit hit, vec2 uv, ivec2 specSize, vec3 albedoSrgb, float blockEmit, float coverage) {
+    ivec2 px = clamp(ivec2(uv * vec2(specSize)), ivec2(0), specSize - 1);
+    vec4 spec = texelFetch(colortex15, px, 0);
+    hit.albedo = srgbToLinear(albedoSrgb);
+    hit.roughness = 1.0 - spec.r;
+    hit.f0 = spec.g;
+    hit.pbrEmission = decodeLabPBREmission(spec.a);
+    hit.blockEmission = blockEmit;
+    hit.coverage = coverage;
+}
+
+vec3 secondaryHitLighting(TraceHit hit, vec3 rayDir, vec3 lightDir, vec3 direct, vec3 bounce, bool mirrorPath) {
+    if (!isLabPBRMetal(hit.f0)) return hit.albedo * (direct * INV_PI + bounce * 0.85);
+    float nv = max(-dot(hit.normal, rayDir), 1e-4);
+    vec3 F0 = evalLabPBRF0(hit.f0, hit.albedo);
+    // The surface cache supplies the low-frequency incident light for this last bounce.
+    vec3 reflected = evalEnvBRDF(F0, nv, hit.roughness) * bounce;
+    if (maxOf(direct) > 0.0) {
+        float nl = max(dot(hit.normal, lightDir), 0.0);
+        vec3 response;
+        if (mirrorPath) {
+            vec3 h = normalize(lightDir - rayDir);
+            vec3 F = fresnelSchlick(F0, saturate(dot(-rayDir, h)));
+            response = F * directGGXLobe(nv, nl, saturate(dot(hit.normal, h)), hit.roughness);
+        } else {
+            // Last stochastic bounce: distribute the GGX directional-hemispherical reflectance over outgoing directions.
+            response = evalEnvBRDF(F0, nl, hit.roughness) * INV_PI;
+        }
+        reflected += direct * response;
+    }
+    return reflected;
+}
+
+float sceneLightRange(float strength) {
+    return clamp(strength * 16.0, 4.0, 16.0);
+}
+
+// NEE owns emission only when this emitter is actually selectable from the receiver.
+bool directLightCovers(ivec3 voxel, vec3 receiver, vec3 normal) {
+    if (!inVoxelBounds(voxel)) return false;
+    ivec3 cell = voxel / 32;
+    uint id = uint(cell.x + LIGHT_CELL_XZ * (cell.z + LIGHT_CELL_XZ * cell.y));
+    uint slot = surfacePool.surfaces[voxelLinearIndex(voxel)].primHead >> 21u;
+    if (slot == 0u) return false;
+    vec4 lamp = lightList.lights[lightList.cellLights[id * LIGHT_CELL_CAP + slot - 1u]].posAndPower;
+    vec3 delta = lamp.xyz - worldToVoxelPos(receiver);
+    float reach = sceneLightRange(lamp.w);
+    float dist2 = dot(delta, delta);
+    return dist2 < reach * reach && dot(delta, normal) > 1e-4 * sqrt(max(dist2, 1e-6));
+}
+
+vec3 indirectHitEmission(TraceHit hit, vec3 receiver, vec3 normal) {
+    float emission = surfaceEmission(hit.pbrEmission, hit.blockEmission * hit.coverage, hit.f0, hit.albedo);
+    if (emission <= 0.0 || (hit.blockEmission > 0.0 && directLightCovers(hit.voxel, receiver, normal))) return vec3(0.0);
+    return hit.albedo * (emission * EMISSIVE_SCALE);
 }
 
 // Structural helper: returns true iff voxel `vCoord` is an opaque Track-1 full cube.
 bool isOpaqueTrack1Voxel(ivec3 vCoord) {
     if (!inVoxelBounds(vCoord)) return false;
     if (texelFetch(voxelGridTex, vCoord, 0).r == 0u) return false;
-    SurfaceVoxel sv = surfacePool.surfaces[voxelLinearIndex(vCoord)];
+    SurfaceVoxel sv = readSurface(voxelLinearIndex(vCoord));
     if (sv.primHead != PRIM_END) return false;
     for (int f = 0; f < 6; ++f) {
         if (sv.face[f] != 0u && ((sv.face[f] >> 26u) & 1u) == 0u) return true;
@@ -154,7 +211,7 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
         else {
             if (texelFetch(voxelGridTex, vCoord, 0).r != 0u) {
                 uint slot = voxelLinearIndex(vCoord);
-                SurfaceVoxel sv = surfacePool.surfaces[slot];
+                SurfaceVoxel sv = readSurface(slot);
 
                 // Compute voxel exit distance to bound primitive tests cleanly.
                 vec3 voxelExitPlane = (vec3(vCoord + stepPos) - vOrigin) * invDir;
@@ -189,28 +246,16 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                                 // Colored glass / ice / translucent block: filter light and keep tracing!
                                 throughput *= evalGlassTransmittance(tex.rgb * tintSrgb, tex.a);
                             } else {
-                                ivec2 spx = clamp(ivec2(atlasUV * vec2(specTexSize)), ivec2(0), specTexSize - 1);
-                                float specA = texelFetch(colortex15, spx, 0).a;
-                                float pbrEmit = (specA > (0.5 / 255.0) && specA < (254.5 / 255.0)) ? specA : 0.0;
-
-                                vec3 albedoLin = srgbToLinear(tex.rgb * tintSrgb);
-                                float emitStr = 0.0;
-                                vec3 emitCol = (blockEmit > 0.0 || pbrEmit > 0.0)
-                                    ? evalEmitterColor(albedoLin, blockEmit, pbrEmit, emitStr)
-                                    : vec3(0.0);
+                                readHitMaterial(result, atlasUV, specTexSize, tex.rgb * tintSrgb, blockEmit,
+                                                isTranslucent ? tex.a : 1.0);
 
                                 bestT = tCur;
                                 foundHit = true;
                                 result.hit = true;
                                 result.fromTrack2 = false;
-                                result.isBlockEmit = (blockEmit > 0.0);
                                 result.dist = tCur;
                                 result.worldPos = voxelToWorldPos(vOrigin + safeDir * tCur);
                                 result.normal = faceIndexToNormal(faceIdx);
-                                result.albedo = albedoLin;
-                                result.emitColor = emitCol;
-                                result.emission = emitStr;
-                                result.emitFluxScale = 1.0;
                                 result.skyLight = unpackSky(sv.tintAndSky);
                             }
                         }
@@ -228,7 +273,7 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                     vec3 bestE1 = vec3(0.0);
                     vec3 bestE2 = vec3(0.0);
                     vec2 bestHitUV = vec2(0.0);
-                    vec3 bestTexRgb = vec3(0.0);
+                    vec4 bestTex = vec4(0.0);
                     vec3 bestTintSrgb = vec3(1.0);
                     float bestPrimEmit = 0.0;
                     #ifdef TRACE_HIGH_PRIM_GUARD
@@ -241,7 +286,27 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                         vec3 p0, e1, e2;
                         uint nextIdx;
                         unpackScenePrimGeo(curIdx, p0, e1, e2, nextIdx);
+#ifdef TRACE_REFLECTION_QUADS
+                        uint link = primPool.prims[curIdx].meta.z;
+                        primIdx = link & PRIM_END;
+                        if ((link & 0x80000000u) != 0u && guard + 1 < maxPrims) {
+                            uint bounds = primPool.prims[curIdx].meta.w;
+                            uvec3 lo = uvec3(bounds, bounds >> 7u, bounds >> 14u) & 127u;
+                            uvec3 hi = uvec3(bounds >> 21u, (bounds >> 28u) | ((link >> 21u) << 4u), link >> 24u) & 127u;
+                            // Test in grid space so the exact triangle path keeps its own local-origin precision.
+                            // Expand the bounds for quantization and the barycentric edge tolerance.
+                            vec3 t0 = ((vec3(vCoord) + vec3(lo) * (1.0 / 31.0) - 2.002) - vOrigin) * invDir;
+                            vec3 t1 = ((vec3(vCoord) + vec3(hi) * (1.0 / 31.0) - 1.998) - vOrigin) * invDir;
+                            float enter = maxOf(min(t0, t1)), leave = minOf(max(t0, t1));
+                            if (leave < 0.0 || enter > bestT + 0.002 || enter > leave) {
+                                ++guard; // The original list budget counts both triangles.
+                                continue;
+                            }
+                            primIdx = nextIdx;
+                        }
+#else
                         primIdx = nextIdx;
+#endif
 
                         vec3 pvec = cross(safeDir, e2);
                         float det = dot(e1, pvec);
@@ -285,7 +350,7 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                         bestE1 = e1;
                         bestE2 = e2;
                         bestHitUV = hitUV;
-                        bestTexRgb = tex.rgb;
+                        bestTex = vec4(tex.rgb, primTrans ? tex.a : 1.0);
                         bestTintSrgb = tintSrgb;
                         bestPrimEmit = primEmit;
                     }
@@ -295,29 +360,14 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                         vec3 triN = rawCross / max(2.0 * triArea, 1e-6);
                         if (dot(triN, safeDir) > 0.0) triN = -triN;
 
-                        ivec2 spx = clamp(ivec2(bestHitUV * vec2(specTexSize)), ivec2(0), specTexSize - 1);
-                        float specA = texelFetch(colortex15, spx, 0).a;
-                        float pbrEmit = (specA > (0.5 / 255.0) && specA < (254.5 / 255.0)) ? specA : 0.0;
-
-                        vec3 albedoLin = srgbToLinear(bestTexRgb * bestTintSrgb);
-                        float emitStr = 0.0;
-                        vec3 emitCol = (bestPrimEmit > 0.0 || pbrEmit > 0.0)
-                            ? evalEmitterColor(albedoLin, bestPrimEmit, pbrEmit, emitStr)
-                            : vec3(0.0);
+                        readHitMaterial(result, bestHitUV, specTexSize, bestTex.rgb * bestTintSrgb, bestPrimEmit, bestTex.a);
 
                         foundHit = true;
                         result.hit = true;
                         result.fromTrack2 = true;
-                        result.isBlockEmit = (bestPrimEmit > 0.0);
                         result.dist = bestT;
                         result.worldPos = voxelToWorldPos(vOrigin + safeDir * bestT);
                         result.normal = triN;
-                        result.albedo = albedoLin;
-                        result.emitColor = emitCol;
-                        result.emission = emitStr;
-                        // Small-emitter solid-angle flux compensation (torches, lanterns, candles, end rods)
-                        float rawFluxScale = clamp(0.32 / max(triArea, 0.006), 1.0, 20.0);
-                        result.emitFluxScale = mix(1.0, rawFluxScale, smoothstep(0.55, 2.2, bestT));
                         result.skyLight = unpackSky(sv.tintAndSky);
                     }
                     if (hitTrans && bestTransT < bestT) {
@@ -326,6 +376,7 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                 }
 
                 if (foundHit) {
+                    result.voxel = vCoord;
                     result.throughput = throughput;
                     return result;
                 }
@@ -422,7 +473,7 @@ vec3 traceVisibility(vec3 worldOrigin, vec3 targetVoxelPos, ivec3 targetVoxel, i
             shift = 2;
         } else if (texelFetch(voxelGridTex, vCoord, 0).r != 0u) {
             uint slot = voxelLinearIndex(vCoord);
-            SurfaceVoxel sv = surfacePool.surfaces[slot];
+            SurfaceVoxel sv = readSurface(slot);
 
             if (lastAxis >= 0) {
                 uint faceIdx = uint(enterFace[lastAxis]);
@@ -551,7 +602,6 @@ vec3 sampleDirectLightsNEE(vec3 worldPos, vec3 normal, bool isSphere, int maxCan
 
     uint cIdxs[8];
     uint cCounts[8];
-    float cScales[8];
     uint localTotal = 0u;
     int nCells = 0;
 
@@ -570,7 +620,6 @@ vec3 sampleDirectLightsNEE(vec3 worldPos, vec3 normal, bool isSphere, int maxCan
                     uint cnt = min(rawCnt, LIGHT_CELL_CAP);
                     cIdxs[nCells]   = ci;
                     cCounts[nCells] = cnt;
-                    cScales[nCells] = float(rawCnt) / float(cnt);
                     localTotal += cnt;
                     ++nCells;
                 }
@@ -592,12 +641,10 @@ vec3 sampleDirectLightsNEE(vec3 worldPos, vec3 normal, bool isSphere, int maxCan
     for (uint i = 0u; i < nCand; ++i) {
         uint target = uint(startF + float(i) * stepF) % localTotal;
         uint idx = 0u;
-        float cellScale = 1.0;
         uint rem = target;
         for (int c = 0; c < nCells; ++c) {
             if (rem < cCounts[c]) {
                 idx = lightList.cellLights[cIdxs[c] * LIGHT_CELL_CAP + rem];
-                cellScale = cScales[c];
                 break;
             }
             rem -= cCounts[c];
@@ -608,7 +655,7 @@ vec3 sampleDirectLightsNEE(vec3 worldPos, vec3 normal, bool isSphere, int maxCan
         vec3 toL = lWorld - worldPos;
         float dist2 = dot(toL, toL);
         float emitStr = L.posAndPower.w;
-        float maxRange = clamp(emitStr * 16.0, 4.0, 16.0);
+        float maxRange = sceneLightRange(emitStr);
         if (dist2 >= maxRange * maxRange) continue;
 
         float dist = sqrt(max(dist2, 1e-6));
@@ -623,9 +670,9 @@ vec3 sampleDirectLightsNEE(vec3 worldPos, vec3 normal, bool isSphere, int maxCan
         win *= win;
         float atten = win / (dist2 + 0.35);
 
-        // Physically calibrated E/PI power matching EMISSIVE_GI_SCALE * A_proj * INV_PI.
+        // Projected-area calibration for the non-cube and full-cube light proxies.
         float neePower = (L.colorAndMeta.a < 0.3) ? 1.55 : 1.35;
-        vec3 contrib = L.colorAndMeta.rgb * (emitStr * neePower * atten * geom * cellScale);
+        vec3 contrib = L.colorAndMeta.rgb * (emitStr * neePower * atten * geom);
         float w = luma(contrib);
         if (w <= 1e-6) continue;
 

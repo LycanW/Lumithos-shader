@@ -101,12 +101,18 @@ uniform sampler2D  colortex15; // blocks_s specular atlas
 struct SurfaceVoxel {
     uint face[6];    // +X, -X, +Y, -Y, +Z, -Z
     uint tintAndSky; // rgb8 tint | sky4 << 24 | flags4 << 28
-    uint primHead;   // Track 2 linked list head (PRIM_END = none)
+    uint primHead;   // Low 21 bits: primitive head or PRIM_END. High bits: one-based light slot within the cell.
 };
 
 layout(std430, binding = 0) coherent buffer SurfacePoolBuffer {
     SurfaceVoxel surfaces[];
 } surfacePool;
+
+SurfaceVoxel readSurface(uint slot) {
+    SurfaceVoxel sv = surfacePool.surfaces[slot];
+    sv.primHead &= PRIM_END;
+    return sv;
+}
 
 uint voxelLinearIndex(ivec3 v) {
     return uint(v.x) + uint(v.z) * uint(VOXEL_RES_XZ) + uint(v.y) * uint(VOXEL_RES_XZ * VOXEL_RES_XZ);
@@ -116,7 +122,7 @@ uint voxelLinearIndex(ivec3 v) {
 struct ScenePrim {
     uvec4 geo;  // x: packSnorm2x16(p0.xy*0.5), y: packSnorm2x16(p0.z*0.5, e1.x*0.5), z: packSnorm2x16(e1.yz*0.5), w: packSnorm2x16(e2.xy*0.5)
     uvec4 uv;   // x: packSnorm2x16(e2.z*0.5, 0), y: packUnorm2x16(uv0), z: packUnorm2x16(uv1), w: packUnorm2x16(uv2)
-    uvec4 meta; // x: next, y: tintRgb8 | (emissive4 << 24) | (flags4 << 28), z: pad, w: pad
+    uvec4 meta; // x: next, y: tintRgb8 | (emissive4 << 24) | (flags4 << 28), z: reflection link and high bound bits, w: packed quad bounds
 };
 
 layout(std430, binding = 1) coherent buffer PrimPoolBuffer {
@@ -321,6 +327,10 @@ void readGBufferSpecMask(ivec2 pixel, out float roughness, out float f0, out boo
 // G: raw F0 byte (0..229 dielectric, 230..237 hardcoded metals, 238..255 albedo-tinted metal)
 // B: 0..64 porosity [0..1], 65..255 subsurface scattering [0..1]
 // A: 1..254 emission [0..1], 0 & 255 = none
+float decodeLabPBREmission(float a) {
+    return (a > (0.5 / 255.0) && a < (254.5 / 255.0)) ? a : 0.0;
+}
+
 void decodeLabPBR(vec4 specTex, out float perceptualRoughness, out float f0Raw, out float porosity, out float sss, out float emission) {
     perceptualRoughness = saturate(1.0 - specTex.r);
     f0Raw = saturate(specTex.g);
@@ -332,15 +342,25 @@ void decodeLabPBR(vec4 specTex, out float perceptualRoughness, out float f0Raw, 
         porosity = 0.0;
         sss = float(bCode - 65) * (1.0 / 190.0);
     }
-    emission = (specTex.a > (0.5 / 255.0) && specTex.a < (254.5 / 255.0)) ? specTex.a : 0.0;
+    emission = decodeLabPBREmission(specTex.a);
 }
 
 bool isLabPBRMetal(float f0Raw) {
     return f0Raw >= (229.5 / 255.0);
 }
 
+// Explicit texel emission takes precedence, including on metals. Only the block-light fallback is masked.
+float surfaceEmission(float pbrEmit, float blockEmit, float f0Raw, vec3 albedoLinear) {
+    if (pbrEmit > 0.0 || blockEmit <= 0.0 || isLabPBRMetal(f0Raw)) return pbrEmit;
+    return blockEmit * pow(saturate((maxOf(albedoLinear) - 0.15) * (1.0 / 0.85)), 1.5);
+}
+
 // Metals always trace specular across the full roughness range [0..1] (since kD = 0);
 // dielectrics trace up to SPECULAR_ROUGH_CUTOFF and blend smoothly into diffuseGI above 0.50.
+bool usesMirrorDirection(float roughness) {
+    return roughness < 0.08;
+}
+
 bool hasSpecularTrace(float roughness, float f0Raw, bool isHand) {
     return !isHand && (roughness <= SPECULAR_ROUGH_CUTOFF || isLabPBRMetal(f0Raw));
 }

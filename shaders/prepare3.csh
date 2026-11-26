@@ -113,17 +113,16 @@ void main() {
     TraceHit hit = traceScene(rayOrig, rayDir, RC_MAX_STEPS, 1.0, true);
     vec3 indRad = vec3(0.0);
     if (hit.hit) {
-        if (!useNEE || !hit.isBlockEmit) {
-            indRad += hit.emitColor * (hit.emission * EMISSIVE_GI_SCALE * hit.emitFluxScale);
-        }
+        indRad += indirectHitEmission(hit, rayOrig, faceNormal);
         float NdotL = max(dot(hit.normal, lightDir), 0.0);
+        vec3 direct = vec3(0.0);
         if (NdotL > 0.0) {
             vec3 vis = sampleShadowFastRay(hit.worldPos, hit.normal, rayDir);
-            indRad += hit.albedo * INV_PI * directCol * (NdotL * vis);
+            direct = directCol * (NdotL * vis);
         }
         // Recursive multi-bounce read-only lookup from the Surface Hash Cache!
         vec3 bounce = queryRadianceCache(hit.worldPos, hit.normal, 1u, false);
-        indRad += hit.albedo * bounce * 0.85;
+        indRad += secondaryHitLighting(hit, rayDir, lightDir, direct, bounce, false);
         indRad *= hit.throughput;
     } else if (hit.exitedGrid) {
         indRad = evalSky(rayDir, false) * hit.throughput;

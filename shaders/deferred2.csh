@@ -2,6 +2,7 @@
 
 // Pass: Specular Reflection (1 SPP GGX VNDF + 24-step frustum-bounded SSR + Hybrid 6-Face/Non-Cube Raytrace)
 #define TRACE_HIGH_PRIM_GUARD
+#define TRACE_REFLECTION_QUADS
 #include "/lib/SpecularTrace.glsl"
 #include "/lib/ScreenTrace.glsl"
 
@@ -36,7 +37,12 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
     }
 
     vec3 H;
-    vec3 rayDir = sampleReflectionDirection(viewDir, shadeNormal, roughness, bnPx, H);
+    int sampleIndex = frameCounter;
+    #ifdef SPECULAR_CHECKERBOARD
+        // GGX pixels trace every other frame; full-rate mirrors do not sample blue noise.
+        sampleIndex >>= 1;
+    #endif
+    vec3 rayDir = sampleReflectionDirection(viewDir, shadeNormal, roughness, roughness >= 0.16 ? bnPx : px, sampleIndex, H);
 
     float NdotV = max(dot(shadeNormal, viewDir), 1e-4);
     float NdotL = dot(shadeNormal, rayDir);
@@ -54,7 +60,7 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
     }
 
     vec3 brdfRatio = vec3(1.0);
-    if (roughness >= 0.08) {
+    if (!usesMirrorDirection(roughness)) {
         float alpha = max(roughness * roughness, 0.002);
         float VdotH = saturate(dot(viewDir, H));
         float g2OverG1 = smithGGX_G2OverG1(NdotV, NdotL, alpha);
@@ -66,7 +72,7 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
     }
 
     vec3 radiance = vec3(0.0);
-    float hitDist = 128.0;
+    float hitDist;
     bool ssrHit = false;
 
     #ifdef SPECULAR_SSR
@@ -118,8 +124,7 @@ void main() {
 
         // Single call-site loop prevents compiler double-inlining of traceScene (keeps GRF registers & I-cache tight!):
         // - slot 0 (active checkerboard pixel): always traces within specular cutoff (zero SIMD warp divergence!).
-        // - slot 1 (companion pixel): traces at 100% FULL RESOLUTION ONLY for smooth/flat mirrors (< 0.16);
-        //   rough glossy pixels (>= 0.16) exit uniformly with -1.0 sentinel for deferred9.csh!
+        // - slot 1: trace deterministic mirrors at full resolution. RELAX takes checkerboarded rough reflections.
         for (int slot = 0; slot < 2; ++slot) {
             ivec2 px = (slot == 0) ? pxA : pxB;
             if (px.x >= res.x) continue;
@@ -138,7 +143,7 @@ void main() {
                 continue;
             }
 
-            if (slot == 1 && roughness >= 0.16) {
+            if (slot == 1 && !usesMirrorDirection(roughness)) {
                 imageStore(colorimg4, px, vec4(0.0, 0.0, 0.0, -1.0));
                 continue;
             }

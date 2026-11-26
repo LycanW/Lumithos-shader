@@ -1,11 +1,31 @@
 #version 430 compatibility
 
-// Pass: Resolve exact glowing color & Track-2 flame centroid for deduplicated emissive voxels
-// registered by shadow.gsh, and bin them into the 5x3x5 Local Macro-Cell Grid (<0.01ms total!).
+// Resolve the material emission of the voxel lights registered by shadow.gsh and bin them for NEE.
 #include "/lib/SceneGeo.glsl"
 
 layout(local_size_x = 64) in;
 const ivec3 workGroups = ivec3(64, 1, 1); // 64 * 64 = 4,096 = MAX_SCENE_LIGHTS
+
+float lightTexelEmission(vec2 uv, ivec2 specSize, float blockEmit, vec3 albedo, out bool authored) {
+    ivec2 px = clamp(ivec2(uv * vec2(specSize)), ivec2(0), specSize - 1);
+    vec2 ga = texelFetch(colortex15, px, 0).ga;
+    float pbr = decodeLabPBREmission(ga.y);
+    authored = pbr > 0.0;
+    return surfaceEmission(pbr, blockEmit, ga.x, albedo);
+}
+
+void binLight(ivec3 voxel, uint head, uint idx, float strength, vec3 color) {
+    if (strength <= 1e-4 || maxOf(color) <= 0.0) return;
+    uint address = voxelLinearIndex(voxel);
+    if (atomicCompSwap(surfacePool.surfaces[address].primHead, head, head | 0x80000000u) != head) return;
+    ivec3 cell = voxel / 32;
+    uint id = uint(cell.x + LIGHT_CELL_XZ * (cell.z + LIGHT_CELL_XZ * cell.y));
+    uint slot = atomicAdd(lightList.cellCount[id], 1u);
+    if (slot < LIGHT_CELL_CAP) {
+        lightList.cellLights[id * LIGHT_CELL_CAP + slot] = idx;
+    }
+    surfacePool.surfaces[address].primHead = head | ((slot < LIGHT_CELL_CAP ? slot + 1u : 0u) << 21u);
+}
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -18,9 +38,10 @@ void main() {
             return;
         }
         uint slot = voxelLinearIndex(v);
-        SurfaceVoxel sv = surfacePool.surfaces[slot];
+        SurfaceVoxel sv = readSurface(slot);
         ivec2 atlasTexSize = max(textureSize(colortex14, 0), ivec2(1));
         vec2  invAtlasSize = 1.0 / vec2(atlasTexSize);
+        ivec2 specSize = textureSize(colortex15, 0);
 
         // 1) Track 1 full-cube emitters
         uint bestDesc = 0u;
@@ -43,19 +64,12 @@ void main() {
             vec4 tex = textureLod(colortex14, uv, 2.0);
             vec3 tintSrgb = isTinted ? unpackTint(sv.tintAndSky) : vec3(1.0);
             vec3 albLin = srgbToLinear(tex.rgb * tintSrgb);
-            float emitStr = 0.0;
-            vec3 emitCol = evalEmitterColor(albLin, blockEmit, 0.0, emitStr);
+            bool authored;
+            float emitStr = lightTexelEmission(uv, specSize, blockEmit * (isTrans ? tex.a : 1.0), albLin, authored);
             vec3 finalPos = vec3(v) + 0.5;
             lightList.lights[idx].posAndPower  = vec4(finalPos, emitStr);
-            lightList.lights[idx].colorAndMeta = vec4(emitCol, 0.5);
-            if (emitStr > 1e-4) {
-                ivec3 lc = clamp(ivec3(floor(finalPos * (1.0 / 32.0))), ivec3(0), ivec3(LIGHT_CELL_XZ - 1, LIGHT_CELL_Y - 1, LIGHT_CELL_XZ - 1));
-                uint cIdx = uint(lc.x + lc.z * LIGHT_CELL_XZ + lc.y * (LIGHT_CELL_XZ * LIGHT_CELL_XZ));
-                uint cSlot = atomicAdd(lightList.cellCount[cIdx], 1u);
-                if (cSlot < LIGHT_CELL_CAP) {
-                    lightList.cellLights[cIdx * LIGHT_CELL_CAP + cSlot] = idx;
-                }
-            }
+            lightList.lights[idx].colorAndMeta = vec4(albLin, 0.5);
+            binLight(v, sv.primHead, idx, emitStr, albLin);
             return;
         }
 
@@ -67,6 +81,7 @@ void main() {
         vec3  sumPos  = vec3(0.0);
         float sumW    = 0.0;
         float bestStr = 0.0;
+        bool hasAuthored = false;
         const vec3 baryPts[4] = vec3[4](
             vec3(0.3333, 0.3333, 0.3334),
             vec3(0.6666, 0.1667, 0.1667),
@@ -91,12 +106,18 @@ void main() {
                     if (tex.a < 0.1) continue;
                     vec3 albLin = srgbToLinear(tex.rgb * tintSrgb);
                     float maxAlb = maxOf(albLin);
-                    if (maxAlb < 0.25) continue;
-                    float emitStr = 0.0;
-                    vec3 emitCol = evalEmitterColor(albLin, primEmit, 0.0, emitStr);
+                    bool authored;
+                    float emitStr = lightTexelEmission(sUV, specSize, primEmit * (primTrans ? tex.a : 1.0), albLin, authored);
+                    if (hasAuthored && !authored) continue;
+                    if (authored && !hasAuthored) {
+                        // A material-authored emitter supersedes block-level estimates collected so far.
+                        hasAuthored = true;
+                        sumW = bestStr = 0.0;
+                        sumCol = sumPos = vec3(0.0);
+                    }
                     float w = emitStr * maxAlb * maxAlb;
                     vec3 sPos = vec3(v) + clamp(p0 + e1 * b.y + e2 * b.z, vec3(0.05), vec3(0.95));
-                    sumCol += emitCol * w;
+                    sumCol += albLin * w;
                     sumPos += sPos * w;
                     sumW   += w;
                     bestStr = max(bestStr, emitStr);
@@ -104,17 +125,10 @@ void main() {
             }
             primIdx = nextIdx;
         }
-        vec3 bestCol = (sumW > 1e-5) ? (sumCol / sumW) : vec3(1.0, 0.55, 0.11);
-        vec3 bestPos = (sumW > 1e-5) ? (sumPos / sumW) : (vec3(v) + 0.5);
+        vec3 bestCol = (sumW > 0.0) ? (sumCol / sumW) : vec3(0.0);
+        vec3 bestPos = (sumW > 0.0) ? (sumPos / sumW) : (vec3(v) + 0.5);
         lightList.lights[idx].posAndPower  = vec4(bestPos, bestStr);
         lightList.lights[idx].colorAndMeta = vec4(bestCol, 0.18);
-        if (bestStr > 1e-4) {
-            ivec3 lc = clamp(ivec3(floor(bestPos * (1.0 / 32.0))), ivec3(0), ivec3(LIGHT_CELL_XZ - 1, LIGHT_CELL_Y - 1, LIGHT_CELL_XZ - 1));
-            uint cIdx = uint(lc.x + lc.z * LIGHT_CELL_XZ + lc.y * (LIGHT_CELL_XZ * LIGHT_CELL_XZ));
-            uint cSlot = atomicAdd(lightList.cellCount[cIdx], 1u);
-            if (cSlot < LIGHT_CELL_CAP) {
-                lightList.cellLights[cIdx * LIGHT_CELL_CAP + cSlot] = idx;
-            }
-        }
+        binLight(v, sv.primHead, idx, bestStr, bestCol);
     }
 }

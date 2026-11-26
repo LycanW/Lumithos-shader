@@ -131,7 +131,7 @@ vec3 sampleShadowFastRay(vec3 worldPos, vec3 normal, vec3 inRayDir) {
 //   comparisons/frame * TAA -> silky smooth edges even at razor-sharp contact points!).
 // - Exact receiver-plane depth bias keeps grazing walls (parallel to sunlight) 100% free of diagonal
 //   self-shadow banding while preserving zero corner light leaks.
-// - Outputs smooth spherical + border coverage (`outShadowCoverage`) so deferred12.csh can
+// - Outputs smooth spherical + border coverage (`outShadowCoverage`) so the lighting pass can
 //   seamlessly hand off to distant screen-space sun shadows + skyLight occlusion with zero ring,
 //   and `outWaterPath` (sunlight travel distance through water) for projected underwater caustics.
 vec3 sampleShadowPCSS(vec3 worldPos, vec3 normal, float blueNoise01, out float outShadowCoverage, out float outWaterPath) {

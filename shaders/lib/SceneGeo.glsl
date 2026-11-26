@@ -126,7 +126,8 @@ ScenePrim packScenePrim(vec3 p0, vec3 e1, vec3 e2, vec2 uv0, vec2 uv1, vec2 uv2,
     pr.uv.z   = packUnorm2x16(saturate(uv1));
     pr.uv.w   = packUnorm2x16(saturate(uv2));
     uint rgb  = packUnorm4x8(vec4(saturate(tintSrgb), 0.0)) & 0x00ffffffu;
-    pr.meta   = uvec4(nextIdx, rgb | ((emissive4 & 15u) << 24u) | (uint(isTranslucent) << 28u) | (uint(isWater) << 29u), 0u, 0u);
+    // prepare4 may replace the duplicate next link and its bounds for reflection traversal.
+    pr.meta   = uvec4(nextIdx, rgb | ((emissive4 & 15u) << 24u) | (uint(isTranslucent) << 28u) | (uint(isWater) << 29u), nextIdx, 0u);
     return pr;
 }
 

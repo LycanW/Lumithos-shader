@@ -141,7 +141,7 @@ vec3 translucentReflection(vec3 V, vec3 geoN, vec3 N, vec3 F0, float roughness,
     #ifdef SPECULAR_REFLECTIONS
         if (traceWeight <= 0.0) return env;
         vec3 H;
-        vec3 R = sampleReflectionDirection(V, N, roughness, px, H);
+        vec3 R = sampleReflectionDirection(V, N, roughness, px, frameCounter, H);
         float NdotL = dot(N, R);
         if (min(dot(geoN, R), NdotL) <= 1e-4) return env * (1.0 - traceWeight);
         vec3 screenColor = vec3(0.0);
@@ -300,11 +300,7 @@ void main() {
         T = transmittedFraction * (1.0 - diffuseOpacity) * glassT;
     }
 
-    float emission = pbrEmission;
-    if (emission <= 0.0 && vBlockEmit > 0.0 && !metal) {
-        float texMask = pow(saturate((maxOf(albedo) - 0.15) * (1.0 / 0.85)), 1.5);
-        emission = vBlockEmit * tex.a * texMask;
-    }
+    float emission = surfaceEmission(pbrEmission, vBlockEmit * tex.a, f0Raw, albedo);
     L += albedo * (emission * EMISSIVE_SCALE);
     L = max(L, vec3(0.0));
     T = clamp(T, vec3(0.0), vec3(1.0));

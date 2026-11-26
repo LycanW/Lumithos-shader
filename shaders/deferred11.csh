@@ -1,6 +1,5 @@
 #version 430 compatibility
-#define ATROUS_SPECULAR
-#define ATROUS_PASS 1
-#define ATROUS_SRC_TILE 1
-#define ATROUS_WRITE_COLORTEX4
-#include "/program/SVGFAtrous.glsl"
+#define FILTER_STEP 8
+#define FILTER_SOURCE 0
+#define FILTER_DEST 1
+#include "/program/LightSpatial.glsl"

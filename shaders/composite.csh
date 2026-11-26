@@ -3,7 +3,7 @@
 // Pass: Clean YCoCg Ellipsoid TAA with 3x3 Closest-Depth Velocity Dilation, Exact Catmull-Rom,
 // Planar Mirror Virtual Reprojection, and Geometry-Aware Disocclusion Reset.
 // Ping-pong taaHistImg (2x1 tiles) lets final.fsh read directly — zero copy pass!
-#include "/lib/SVGF.glsl"
+#include "/lib/Reprojection.glsl"
 #include "/lib/SkyShadow.glsl"
 #include "/lib/Water.glsl"
 
@@ -85,13 +85,14 @@ void main() {
     float centerDepth = texelFetch(depthtex1, px, 0).r;
     float centerDepth0 = texelFetch(depthtex0, px, 0).r;
     bool isTranslucent = centerDepth0 < centerDepth - 1e-7;
-    float centerRough = 1.0;
+    float centerRough = 1.0, centerF0 = 0.0;
+    float frameLimit = TAA_MAX_FRAMES;
     bool centerHand = false;
     vec3 centerGeoN = vec3(0.0, 1.0, 0.0);
     vec3 centerShadeN = vec3(0.0, 1.0, 0.0);
 
     if (centerDepth < 0.999999) {
-        readGBufferRoughHand(px, centerRough, centerHand);
+        readGBufferSpecMask(px, centerRough, centerF0, centerHand);
         // First-person hand has no world motion vector and swings rapidly -> bypass TAA cleanly (zero hand ghosting!).
         if (centerHand && !isTranslucent) {
             imageStore(taaHistImg, px + currOff, roundHalf(vec4(curr, 1.0)));
@@ -146,6 +147,17 @@ void main() {
             }
         }
 
+        #ifdef SPECULAR_REFLECTIONS
+        if (!isTranslucent && isLabPBRMetal(centerF0) && centerRough >= 0.08 && any(notEqual(cameraVelocity, vec3(0.0)))) {
+            vec3 v = mat3(gbufferModelView) * cameraVelocity;
+            vec2 offset = v.xy - v.z * centerView.xy / centerView.z;
+            vec2 focalPx = 0.5 * vec2(res) * vec2(gbufferProjection[0][0], gbufferProjection[1][1]);
+            float parallaxPx = length(focalPx * offset) / max(-centerView.z, 1e-4);
+            float footprintPx = max(1.0, 0.25 * focalPx.y * centerRough * centerRough);
+            frameLimit = min(frameLimit, 1.0 + footprintPx / max(parallaxPx, 1e-4));
+        }
+        #endif
+
         vec2 prevAtRef = reprojectScreenUV(refUV, reprojTarget);
         if (prevAtRef.x >= 0.0) {
             motion = prevAtRef - refUV;
@@ -177,14 +189,28 @@ void main() {
             }
             m1 *= (1.0 / 9.0);
             m2 *= (1.0 / 9.0);
-            vec3 clipStdDev = max(sqrt(max(m2 - m1 * m1, vec3(0.0))) * TAA_CLIP_GAMMA, vec3(1e-4));
-
             vec3 prevYcc = rgbToYCoCg(prev);
             vec3 delta = prevYcc - m1;
+            float clipFloor = 1e-4;
+            bool limitClippedHistory = frameLimit < TAA_MAX_FRAMES;
+            #ifdef SPECULAR_REFLECTIONS
+            if (!isTranslucent && isLabPBRMetal(centerF0) && centerRough >= 0.16
+                && all(equal(cameraVelocity, vec3(0.0))) && length(motion * vec2(res)) < 0.001) {
+                // A flat, noisy patch can have almost zero spatial variance despite changing ray samples.
+                float noise = 0.12 * sqrt(max(m1.x, 0.01));
+                float deviation = maxOf(abs(delta)) / noise;
+                clipFloor = max(clipFloor, noise * (1.0 - smoothstep(1.0, 3.0, deviation)));
+                limitClippedHistory = deviation > 3.0;
+            }
+            #endif
+            vec3 clipStdDev = max(sqrt(max(m2 - m1 * m1, vec3(0.0))) * TAA_CLIP_GAMMA, vec3(clipFloor));
             vec3 unitD = delta / clipStdDev;
             float unitLenSq = dot(unitD, unitD);
             if (unitLenSq > 1.0) {
-                prevYcc = m1 + delta * inversesqrt(unitLenSq);
+                float retained = inversesqrt(unitLenSq);
+                prevYcc = m1 + delta * retained;
+                if (limitClippedHistory)
+                    frameLimit = min(frameLimit, 1.0 / max(1.0 - retained, 1e-5));
             }
 
             // Subpixel sharpening during fractional-pixel resampling (mathematically 0.0 when static).
@@ -195,7 +221,7 @@ void main() {
             float prevLum = max(prevYcc.x, 0.0);
             float temporalContrast = saturate(abs(currLum - prevLum) / max(max(currLum, prevLum), 1e-4));
 
-            outFrames = min(prevFrames + 1.0, TAA_MAX_FRAMES);
+            outFrames = min(prevFrames + 1.0, frameLimit);
             float blendWeight = outFrames * (1.0 + temporalContrast * temporalContrast * TAA_ANTIFLICKER);
 
             // Perceptual YCoCg blend.

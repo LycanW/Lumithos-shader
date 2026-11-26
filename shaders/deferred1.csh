@@ -60,7 +60,7 @@ void main() {
     vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, geoNormal, toCam, camDist);
 
     vec3 neeDir = vec3(0.0, 1.0, 0.0);
-    vec3 neeRad = sampleDirectLightsNEE(rayOrig, shadeNormal, false, 16, stbn2D(bnPx, bnSeq, 8u), neeDir);
+    vec3 neeRad = sampleDirectLightsNEE(rayOrig, shadeNormal, false, 16, sampleBlueNoiseRG(bnPx + ivec2(0, 64), bnSeq), neeDir);
     if (any(isnan(neeRad)) || any(isinf(neeRad)) || maxOf(neeRad) <= 1e-5) return;
 
     vec4 prev = imageLoad(colorimg3, px);
