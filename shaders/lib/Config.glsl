@@ -32,6 +32,9 @@
 // 0 = 31-frame limit, 1 = 64-frame limit, 2 = frame-rate-scaled limits.
 #define DIFFUSE_HISTORY_MODE 1 // [0 1 2]
 #define SPECULAR_CHECKERBOARD
+// 0 = GGX VNDF, 2 = fitted core and spatially reused tail.
+#define SPECULAR_LOBE_MODE 2 // [0 2]
+#define SPECULAR_BOUNCES 1 // [1 2 3 4]
 //#define DIFFUSE_SSRT
 #define SPECULAR_SSR
 #define PATH_GUIDING

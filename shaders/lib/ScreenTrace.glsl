@@ -12,10 +12,11 @@ uniform sampler2D prevGuideTex;
 // - Validates the 6-step refined hit directly against the pixel's 3D geometric surface plane
 //   (abs(dot(bRayView - bHitView, hitViewGeoN)) <= subpixel tolerance) + front-facing normal + strict collinearity;
 //   any miss falls back immediately to exact 3D voxel path-traced reflection!
-bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float dither, float minWorldDist, out vec2 prevHitUV, out float hitDist, out ivec3 hitVoxel) {
+bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float dither, float minWorldDist, out vec2 prevHitUV, out float hitDist, out ivec3 hitVoxel, out ivec2 hitPixel) {
     prevHitUV = vec2(-1.0);
     hitDist = 0.0;
     hitVoxel = ivec3(-1);
+    hitPixel = ivec2(-1);
 
     vec3 viewDir = normalize(mat3(gbufferModelView) * worldDir);
     if (viewDir.z > 0.92) return false; // pointing back toward camera
@@ -114,6 +115,7 @@ bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float dither, f
                                         prevHitUV = puv;
                                         hitDist = d;
                                         hitVoxel = ivec3(floor(worldToVoxelPos(hitWorld - hitGeoN * 0.004)));
+                                        hitPixel = bpx;
                                         return true;
                                     }
                                 }
@@ -130,9 +132,9 @@ bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float dither, f
     return false;
 }
 
-bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float dither, float minWorldDist, out vec2 prevHitUV, out float hitDist) {
-    ivec3 unusedVoxel;
-    return screenSpaceTrace(viewOrigin, worldDir, steps, dither, minWorldDist, prevHitUV, hitDist, unusedVoxel);
+bool screenSpaceTrace(vec3 viewOrigin, vec3 worldDir, int steps, float dither, float minWorldDist, out vec2 prevHitUV, out float hitDist, out ivec3 hitVoxel) {
+    ivec2 unusedPixel;
+    return screenSpaceTrace(viewOrigin, worldDir, steps, dither, minWorldDist, prevHitUV, hitDist, hitVoxel, unusedPixel);
 }
 
 #endif

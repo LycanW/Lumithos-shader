@@ -18,6 +18,7 @@
 uniform sampler2D gtexture;
 uniform sampler2D normals;
 uniform sampler2D specular;
+uniform sampler2D prevGuideTex;
 layout(rgba16f) uniform readonly image2D colorimg0;
 
 in vec2  vTexCoord;
@@ -35,7 +36,7 @@ layout(location = 1) out vec4 transmitOut;
 layout(location = 2) out vec4 refractOut;
 
 // Current-frame SSR reads opaque depth and the lit scene after aerial perspective.
-// - Reconstructs exact view-space surface normal from adjacent depthtex1 pixels (no colortex1/2 needed in gbuffers!).
+// - Reconstructs the view-space surface normal from neighboring depth samples.
 // - Enforces front-to-back crossing + 6-step binary refinement + 3D plane distance + collinearity check;
 //   any miss falls back immediately to exact 3D voxel path-traced reflection!
 float traceTranslucentSSR(vec3 viewPos, vec3 viewR, float dither, out vec3 hitCol) {
@@ -112,6 +113,17 @@ float traceTranslucentSSR(vec3 viewPos, vec3 viewR, float dither, out vec3 hitCo
                         vec3 toHit = bHitView - viewPos;
                         float d = length(toHit);
                         if (d > 0.08 && dot(toHit / max(d, 1e-5), viewR) > 0.985) {
+                            // The opaque resolve has already published the reflection class in this frame's guide.
+                            vec4 guide = texelFetch(prevGuideTex, bpx, 0);
+                            #if SPECULAR_BOUNCES > 1
+                                bool needsDirectionalTrace = guide.z < SPECULAR_ROUGH_CUTOFF || (uint(guide.x) & 65536u) != 0u;
+                            #else
+                                bool needsDirectionalTrace = usesMirrorDirection(guide.z);
+                            #endif
+                            if (guide.w > 0.0 && needsDirectionalTrace) {
+                                vec3 hitWorld = viewToWorld(bHitView - hitViewN * 0.004);
+                                if (hasReflectionVoxel(ivec3(floor(worldToVoxelPos(hitWorld))))) return 0.0;
+                            }
                             // colortex5 marks opaque emitters whose emission is baked into the lit scene.
                             if (beyondEmitterRange(d) && texelFetch(colortex5, bpx, 0).a > 0.0) return 0.0;
                             hitCol = max(imageLoad(colorimg0, bpx).rgb, vec3(0.0));

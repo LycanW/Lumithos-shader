@@ -1,6 +1,6 @@
 #version 430 compatibility
 
-// Pass: Specular Reflection (1 SPP GGX VNDF + 24-step frustum-bounded SSR + Hybrid 6-Face/Non-Cube Raytrace)
+// Pass: Specular Reflection (one path sample, configurable bounce limit)
 #define TRACE_HIGH_PRIM_GUARD
 #define TRACE_REFLECTION_QUADS
 #include "/lib/SpecularTrace.glsl"
@@ -14,6 +14,9 @@ const vec2 workGroupsRender = vec2(1.0, 1.0);
 #endif
 
 layout(rgba16f) uniform writeonly image2D colorimg4;
+#if defined(SPECULAR_REFLECTIONS) && SPECULAR_LOBE_MODE != 0
+layout(rgba16f) uniform writeonly image2D glossWorkImg;
+#endif
 
 vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roughness, float f0Raw) {
     vec3 geoNormal, shadeNormal;
@@ -36,15 +39,26 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
         shadeNormal = normalize(shadeNormal + viewDir * (0.05 - rawNdotV));
     }
 
-    vec3 H;
     int sampleIndex = frameCounter;
     #ifdef SPECULAR_CHECKERBOARD
-        // GGX pixels trace every other frame; full-rate mirrors do not sample blue noise.
+        // Rough reflections trace every other frame. Full-rate mirrors use the exact direction.
         sampleIndex >>= 1;
     #endif
-    vec3 rayDir = sampleReflectionDirection(viewDir, shadeNormal, roughness, roughness >= 0.16 ? bnPx : px, sampleIndex, H);
 
-    float NdotV = max(dot(shadeNormal, viewDir), 1e-4);
+    #if SPECULAR_LOBE_MODE == 0
+        vec3 H;
+        vec3 rayDir = sampleReflectionDirection(viewDir,shadeNormal,roughness,roughness >= 0.16 ? bnPx : px,sampleIndex,H);
+    #else
+        vec3 rayDir = reflect(-viewDir, shadeNormal);
+    #endif
+    bool roughReflection = !usesMirrorDirection(roughness);
+    #if SPECULAR_LOBE_MODE != 0
+    if (roughReflection) {
+        vec2 noise = sampleBlueNoiseRG(roughness >= 0.16 ? bnPx : px, sampleIndex);
+        rayDir = sampleGlossCore(viewDir, shadeNormal, roughness, noise);
+    }
+    #endif
+
     float NdotL = dot(shadeNormal, rayDir);
     if (NdotL <= 1e-4) {
         return vec4(0.0, 0.0, 0.0, 0.0);
@@ -55,25 +69,18 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
     float GdotL = dot(rayDir, geoNormal);
     if (GdotL <= 0.02) {
         rayDir = normalize(rayDir + geoNormal * (0.025 - GdotL));
-        H = normalize(viewDir + rayDir);
-        NdotL = max(dot(shadeNormal, rayDir), 1e-4);
-    }
-
-    vec3 brdfRatio = vec3(1.0);
-    if (!usesMirrorDirection(roughness)) {
-        float alpha = max(roughness * roughness, 0.002);
-        float VdotH = saturate(dot(viewDir, H));
-        float g2OverG1 = smithGGX_G2OverG1(NdotV, NdotL, alpha);
-        vec3 albedoLin = isLabPBRMetal(f0Raw) ? srgbToLinear(unpackUnorm4x8(texelFetch(colortex1, px, 0).r).rgb) : vec3(0.0);
-        vec3 F0_rgb = evalLabPBRF0(f0Raw, albedoLin);
-        vec3 F_vh = fresnelSchlick(F0_rgb, VdotH);
-        vec3 envBrdf = evalEnvBRDF(F0_rgb, NdotV, roughness);
-        brdfRatio = clamp((F_vh * g2OverG1) / max(envBrdf, vec3(1e-3)), vec3(0.0), vec3(4.0));
+        #if SPECULAR_LOBE_MODE == 0
+            H = normalize(viewDir + rayDir);
+            NdotL = max(dot(shadeNormal,rayDir),1e-4);
+        #endif
     }
 
     vec3 radiance = vec3(0.0);
     float hitDist;
     bool ssrHit = false;
+    #if defined(SPECULAR_REFLECTIONS) && SPECULAR_LOBE_MODE != 0
+        vec3 originOffset = geoNormal * 0.04;
+    #endif
 
     #ifdef SPECULAR_SSR
         // Smooth/mirror surfaces (perceptual roughness < 0.25) bypass SSR and trace 100% exact 3D geometry
@@ -81,11 +88,22 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
         if (frameCounter > 1 && roughness >= 0.25) {
             vec2 prevHitUV;
             float ssDist;
-            if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * geoNormal) * 0.04, rayDir, 24, stbn2D(bnPx, frameCounter, 10u).x, 0.25, prevHitUV, ssDist)) {
+            ivec3 hitVoxel;
+            ivec2 hitPixel;
+            if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * geoNormal) * 0.04, rayDir, 24, stbn2D(bnPx, frameCounter, 10u).x, 0.25, prevHitUV, ssDist, hitVoxel, hitPixel)) {
+                float hitRoughness, hitF0;
+                bool hitHand;
+                readGBufferSpecMask(hitPixel, hitRoughness, hitF0, hitHand);
                 ivec2 hpx = clamp(ivec2(prevHitUV * screenSize()), ivec2(0), res - 1);
                 vec4 prevTap = texelFetch(colortex5, hpx, 0);
                 // The voxel path can range-test emission separately from reflected light.
-                if ((!beyondEmitterRange(ssDist) || prevTap.a <= 0.0)
+                #if SPECULAR_BOUNCES > 1
+                    bool needsDirectionalTrace = specularBounceShare(hitRoughness, hitF0) > 0.0;
+                #else
+                    bool needsDirectionalTrace = isLabPBRMetal(hitF0) && usesMirrorDirection(hitRoughness);
+                #endif
+                if (!(needsDirectionalTrace && hasReflectionVoxel(hitVoxel))
+                    && (!beyondEmitterRange(ssDist) || prevTap.a <= 0.0)
                     && !any(isnan(prevTap.rgb)) && !any(isinf(prevTap.rgb))) {
                     radiance = min(max(prevTap.rgb, vec3(0.0)), vec3(12.0));
                     hitDist = ssDist;
@@ -98,9 +116,29 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
     if (!ssrHit) {
         vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, geoNormal, viewDir, camDist);
         radiance = traceVoxelReflection(rayOrig, rayDir, roughness, bnPx, SPECULAR_MAX_STEPS, true, hitDist);
+        #if defined(SPECULAR_REFLECTIONS) && SPECULAR_LOBE_MODE != 0
+            originOffset = rayOrig - worldPos;
+        #endif
     }
 
-    radiance *= brdfRatio;
+    #if SPECULAR_LOBE_MODE == 0
+        if (roughReflection) {
+            float NdotV = max(dot(shadeNormal,viewDir),1e-4);
+            float alpha = max(roughness * roughness,0.002);
+            float VdotH = saturate(dot(viewDir,H));
+            float g2OverG1 = smithGGX_G2OverG1(NdotV,NdotL,alpha);
+            vec3 albedoLin = isLabPBRMetal(f0Raw) ? srgbToLinear(unpackUnorm4x8(texelFetch(colortex1,px,0).r).rgb) : vec3(0.0);
+            vec3 F0 = evalLabPBRF0(f0Raw,albedoLin);
+            vec3 envBRDF = evalEnvBRDF(F0,NdotV,roughness);
+            radiance *= clamp(fresnelSchlick(F0,VdotH) * g2OverG1 / max(envBRDF,vec3(1e-3)),vec3(0.0),vec3(4.0));
+        }
+    #endif
+    #if defined(SPECULAR_REFLECTIONS) && SPECULAR_LOBE_MODE != 0
+        if (roughReflection && hitDist > 0.0 && hitDist < 65504.0) {
+            vec3 hitView = viewPos + mat3(gbufferModelView) * (originOffset + rayDir * hitDist);
+            imageStore(glossWorkImg,glossHitPixel(px),vec4(hitView,0.0));
+        }
+    #endif
     float specClamp = (roughness < 0.12) ? 32.0 : 12.0;
     radiance = min(max(radiance, vec3(0.0)), vec3(specClamp));
     if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);

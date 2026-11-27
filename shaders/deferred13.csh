@@ -374,9 +374,8 @@ void main() {
     vec3 specularGI = max(texelFetch(colortex4, px, 0).rgb, vec3(0.0));
     vec3 emissive   = (mat.emission > 0.0) ? (mat.albedo * (mat.emission * EMISSIVE_SCALE)) : vec3(0.0);
 
-    // Physical GGX split-sum environment BRDF remodulation + energy conservation:
-    // - Metals use traced GGX specular across the entire [0..1] roughness range (never black!).
-    // - Dielectrics smoothly cross-fade from traced GGX to diffuseGI across [0.50..0.65] (zero cutoff cliff!).
+    // Apply the preintegrated BRDF strength to the filtered reflection lighting.
+    // Metals use the traced signal at all roughnesses. Rough dielectrics blend toward diffuse GI.
     vec3 envBrdf = evalEnvBRDF(F0_rgb, NdotV, mat.roughness);
     vec3 kD_env  = isMetal ? vec3(0.0) : (1.0 - envBrdf);
     float specTraceFade = isMetal ? 1.0 : smoothstep(SPECULAR_ROUGH_CUTOFF, 0.50, mat.roughness);
