@@ -1,5 +1,8 @@
 #version 430 compatibility
 #include "/lib/LightFilter.glsl"
+#ifdef ENTITY_REFLECTION_HISTORY
+    #include "/lib/GlossLobe.glsl"
+#endif
 #if DIFFUSE_HISTORY_MODE == 2
 uniform float diffuseHistoryFrameTime;
 #endif
@@ -159,6 +162,12 @@ void main() {
             float tracked=mix(real.distances.y,virt.distances.y,blend);
             tracking=vec4(distance,mix(tracked,distance,max(0.1,1.0-confidence)),confidence,0.0);
         }
+        #ifdef ENTITY_REFLECTION_HISTORY
+            else if (s.z > 0.0 && texelFetch(colortex4, p, 0).a >= 0.0) {
+                tracking.xy = texelFetch(glossWorkTex, glossHitPixel(p), 0).xy;
+                tracking.z = any(notEqual(tracking.xy, vec2(0.0))) ? -1.0 : 0.0;
+            }
+        #endif
         imageStore(glossHistoryImg,workPixel(p,2+(frameCounter&1)),tracking);
         imageStore(glossWorkImg,p,slow);imageStore(glossWorkImg,workPixel(p,1),fast);
     #endif

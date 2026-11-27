@@ -20,15 +20,20 @@ bool hasReflectionVoxel(ivec3 voxel) {
     return inVoxelBounds(voxel) && texelFetch(voxelGridTex, voxel, 0).r != 0u;
 }
 
-vec3 traceVoxelReflection(vec3 rayOrig, vec3 rayDir, float roughness, ivec2 bnPx, int smoothSteps, bool includeSkyDisc, out float hitDist) {
+vec3 traceVoxelReflection(vec3 rayOrig, vec3 rayDir, float roughness, ivec2 bnPx, int smoothSteps,
+                          bool includeSkyDisc, out float hitDist, out uint entityPose) {
     vec3 radiance = vec3(0.0);
     vec3 throughput = vec3(1.0);
     hitDist = 0.0; // No measured geometry distance for a cache fallback.
+    entityPose = 0u;
     vec3 lightDir = getShadowLightDir();
     for (int bounce = 0; bounce < SPECULAR_BOUNCES; ++bounce) {
         float specLod = roughness < 0.25 ? 0.0 : 1.0;
         int maxSpecSteps = roughness < 0.22 ? smoothSteps : 48;
         TraceHit hit = traceScene(rayOrig, rayDir, maxSpecSteps, specLod, true, true);
+        #ifdef ENTITY_REFLECTION_HISTORY
+            if (hit.entityPose != 0u) entityPose = hit.entityPose;
+        #endif
         throughput *= hit.throughput;
         // The spatial filter reconstructs the first hit position along the original ray.
         if (bounce == 0) hitDist = hit.hit ? hit.dist : (hit.exitedGrid ? 65504.0 : 0.0);
@@ -43,6 +48,10 @@ vec3 traceVoxelReflection(vec3 rayOrig, vec3 rayDir, float roughness, ivec2 bnPx
         if (hit.dist <= 0.0) break;
 
         float emission = coveredHitEmission(hit, rayOrig);
+        #ifdef ENTITY_REFLECTIONS_ENABLED
+            // Smooth mirrors see the finite emitting surface. Rough surfaces use their direct-light lobe.
+            if (usesMirrorDirection(roughness)) emission += hit.heldEmission;
+        #endif
         radiance += throughput * hit.albedo * (emission * EMISSIVE_SCALE);
 
         float hitNdotL = max(dot(hit.normal, lightDir), 0.0);

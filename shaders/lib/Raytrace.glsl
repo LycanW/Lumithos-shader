@@ -19,6 +19,12 @@ struct TraceHit {
     float coverage;
     ivec3 voxel;
     float skyLight;
+    #ifdef ENTITY_REFLECTIONS_ENABLED
+        float heldEmission;
+    #endif
+    #ifdef ENTITY_REFLECTION_HISTORY
+        uint entityPose;
+    #endif
 };
 
 TraceHit makeMissHit() {
@@ -38,6 +44,12 @@ TraceHit makeMissHit() {
     h.coverage = 1.0;
     h.voxel = ivec3(-1);
     h.skyLight = 1.0;
+    #ifdef ENTITY_REFLECTIONS_ENABLED
+        h.heldEmission = 0.0;
+    #endif
+    #ifdef ENTITY_REFLECTION_HISTORY
+        h.entityPose = 0u;
+    #endif
     return h;
 }
 
@@ -355,7 +367,7 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                     vec3 bestTintSrgb = vec3(1.0);
                     float bestPrimEmit = 0.0;
                     #ifdef ENTITY_REFLECTIONS_ENABLED
-                        bool bestEntity = false;
+                        uint bestEntityIdx = PRIM_END;
                     #endif
                     #ifdef TRACE_HIGH_PRIM_GUARD
                         const int maxPrims = 256;
@@ -430,12 +442,15 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
 
                         vec2 hitUV = uv0 * (1.0 - u - v) + uv1 * u + uv2 * v;
                         vec4 tex;
+                        float alphaCutoff = 0.1;
                         #ifdef ENTITY_REFLECTIONS_ENABLED
-                            if (entity) tex = sampleEntityPatch(primPool.prims[curIdx].meta.w, hitUV);
-                            else
+                            if (entity) {
+                                tex = sampleEntityPatch(primPool.prims[curIdx].meta.w, hitUV);
+                                alphaCutoff = 0.5 / 255.0;
+                            } else
                         #endif
                         tex = primWater ? vec4(1.0) : textureLod(colortex14, hitUV, atlasLod);
-                        if (!primWater && tex.a < 0.1) continue;
+                        if (!primWater && tex.a < alphaCutoff) continue;
 
                         if (passTranslucent && (primWater || (primTrans && primEmit <= 0.0 && tex.a < 0.98))) {
                             // Secondary rays store interfaces only. Approximate one block of water per crossing.
@@ -456,7 +471,8 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                         bestTintSrgb = tintSrgb;
                         bestPrimEmit = primEmit;
                         #ifdef ENTITY_REFLECTIONS_ENABLED
-                            bestEntity = entity;
+                            bestEntityIdx = entity ? curIdx : PRIM_END;
+                            if (entity) bestTex.a = tex.a;
                         #endif
                     }
                     if (foundT2) {
@@ -466,9 +482,13 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                         if (dot(triN, safeDir) > 0.0) triN = -triN;
 
                         #ifdef ENTITY_REFLECTIONS_ENABLED
-                            if (bestEntity) {
+                            if (bestEntityIdx != PRIM_END) {
                                 result.albedo = srgbToLinear(bestTex.rgb * bestTintSrgb);
                                 result.skyLight = bestPrimEmit; // Entity primitives store sky light in this field.
+                                result.heldEmission = (round(bestTex.a * 255.0) - 1.0) / 254.0;
+                                #ifdef ENTITY_REFLECTION_HISTORY
+                                    result.entityPose = primPool.prims[bestEntityIdx].meta.z;
+                                #endif
                             } else
                         #endif
                         {

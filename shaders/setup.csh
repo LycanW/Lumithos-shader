@@ -31,6 +31,9 @@ void main() {
         if (slot < MAX_ENTITY_PRIMITIVES) entityPool.occupiedSlots[slot] = TOTAL_VOXELS;
         if (slot < ENTITY_BRICK_WORDS) entityPool.brickBits[slot] = 0u;
         if (slot < ENTITY_SUPER_WORDS) entityPool.superBits[slot] = 0u;
+        #ifdef ENTITY_REFLECTION_HISTORY
+            if (slot < 2u * ENTITY_POSE_WORDS) entityPool.poseBits[slot] = 0u;
+        #endif
     #endif
 
     if (slot < SC_TOTAL_SLOTS) {
@@ -42,6 +45,8 @@ void main() {
         #ifdef ENTITY_REFLECTIONS_ENABLED
             primPool.entityPrimCount = 0u;
             entityPool.texelCount = 0u;
+            entityPool.heldLightMoments[0] = ivec4(0);
+            entityPool.heldLightMoments[1] = ivec4(0);
         #endif
     }
 }

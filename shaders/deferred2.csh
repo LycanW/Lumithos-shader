@@ -14,7 +14,7 @@ const vec2 workGroupsRender = vec2(1.0, 1.0);
 #endif
 
 layout(rgba16f) uniform writeonly image2D colorimg4;
-#if defined(SPECULAR_REFLECTIONS) && SPECULAR_LOBE_MODE != 0
+#if (defined(SPECULAR_REFLECTIONS) && SPECULAR_LOBE_MODE != 0) || defined(ENTITY_REFLECTION_HISTORY)
 layout(rgba16f) uniform writeonly image2D glossWorkImg;
 #endif
 
@@ -61,6 +61,9 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
 
     float NdotL = dot(shadeNormal, rayDir);
     if (NdotL <= 1e-4) {
+        #ifdef ENTITY_REFLECTION_HISTORY
+            if (!roughReflection) imageStore(glossWorkImg, glossHitPixel(px), vec4(0.0));
+        #endif
         return vec4(0.0, 0.0, 0.0, 0.0);
     }
 
@@ -77,6 +80,7 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
 
     vec3 radiance = vec3(0.0);
     float hitDist;
+    uint entityPose = 0u;
     bool ssrHit = false;
     #if defined(SPECULAR_REFLECTIONS) && SPECULAR_LOBE_MODE != 0
         vec3 originOffset = geoNormal * 0.04;
@@ -115,7 +119,7 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
 
     if (!ssrHit) {
         vec3 rayOrig = makeCornerSafeRayOrigin(worldPos, geoNormal, viewDir, camDist);
-        radiance = traceVoxelReflection(rayOrig, rayDir, roughness, bnPx, SPECULAR_MAX_STEPS, true, hitDist);
+        radiance = traceVoxelReflection(rayOrig, rayDir, roughness, bnPx, SPECULAR_MAX_STEPS, true, hitDist, entityPose);
         #if defined(SPECULAR_REFLECTIONS) && SPECULAR_LOBE_MODE != 0
             originOffset = rayOrig - worldPos;
         #endif
@@ -138,6 +142,11 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
             vec3 hitView = viewPos + mat3(gbufferModelView) * (originOffset + rayDir * hitDist);
             imageStore(glossWorkImg,glossHitPixel(px),vec4(hitView,0.0));
         }
+    #endif
+    #ifdef ENTITY_REFLECTION_HISTORY
+        // Two exact half-float integers store the pose in the mirror pixel's unused hit tile.
+        if (!roughReflection) imageStore(glossWorkImg, glossHitPixel(px),
+            vec4(vec2(uvec2(entityPose & 2047u, entityPose >> 11u)), 0.0, 0.0));
     #endif
     float specClamp = (roughness < 0.12) ? 32.0 : 12.0;
     radiance = min(max(radiance, vec3(0.0)), vec3(specClamp));

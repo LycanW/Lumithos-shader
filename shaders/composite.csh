@@ -169,11 +169,17 @@ void main() {
     vec3 result = curr;
     float outFrames = 1.0;
 
+    bool validateMirror = false;
+    #ifdef ENTITY_REFLECTION_HISTORY
+        validateMirror = !isTranslucent && centerDepth < 0.999999 && usesMirrorDirection(centerRough);
+        if (validateMirror && reflectionPoseChanged(px + currOff + ivec2(0, res.y), frameCounter - 1))
+            validMotion = false;
+    #endif
     if (frameCounter > 1 && validMotion && all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThan(prevUV, vec2(1.0)))) {
-        vec4 prevTap = fetchHistoryFast4(taaHistTex, prevUV, res, prevOff);
+        vec4 prevTap = fetchHistoryFast4(taaHistTex, prevUV, res, prevOff, validateMirror);
         vec3 prev = prevTap.rgb;
         float prevFrames = prevTap.a;
-        if (!any(isnan(prev)) && !any(isinf(prev))) {
+        if ((!validateMirror || prevFrames > 0.0) && !any(isnan(prev)) && !any(isinf(prev))) {
             // 3x3 linear HDR YCoCg moments + strict 100% ellipsoid clipping.
             vec3 currYcc = rgbToYCoCg(curr);
             vec3 m1 = currYcc;

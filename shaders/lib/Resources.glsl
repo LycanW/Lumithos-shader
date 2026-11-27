@@ -137,10 +137,18 @@ layout(std430, binding = 1) coherent buffer PrimPoolBuffer {
 #ifdef ENTITY_REFLECTIONS
 #ifdef SPECULAR_REFLECTIONS
 #define ENTITY_REFLECTIONS_ENABLED
+const int HELD_TORCH_ID = 20100;
+const int LOCAL_PLAYER_ENTITY_ID = 30101;
+const float HELD_LIGHT_MOMENT_SCALE = 1048576.0;
 const uint MAX_ENTITY_PRIMITIVES = 16384u;
 const uint ENTITY_TEXEL_CAPACITY = 1048576u;
 const uint ENTITY_BRICK_WORDS = (BRICK_RES_XZ * BRICK_RES_XZ * BRICK_RES_Y + 31) / 32;
 const uint ENTITY_SUPER_WORDS = (SUPER_RES_XZ * SUPER_RES_XZ * SUPER_RES_Y + 31) / 32;
+#ifdef TAA_ENABLED
+    #define ENTITY_REFLECTION_HISTORY
+    const uint ENTITY_POSE_BITS = 22u;
+    const uint ENTITY_POSE_WORDS = 1u << (ENTITY_POSE_BITS - 5u);
+#endif
 
 layout(std430, binding = 5) coherent buffer EntityPoolBuffer {
     uint texelCount;
@@ -149,11 +157,21 @@ layout(std430, binding = 5) coherent buffer EntityPoolBuffer {
     uint brickBits[ENTITY_BRICK_WORDS];
     uint superBits[ENTITY_SUPER_WORDS];
     uint texels[ENTITY_TEXEL_CAPACITY];
+    ivec4 heldLightMoments[2]; // View-space first moment and emitting weight, in fixed point.
+    #ifdef ENTITY_REFLECTION_HISTORY
+        uint poseBits[2u * ENTITY_POSE_WORDS];
+    #endif
 } entityPool;
 
 uint entityNodeIndex(ivec3 node, int width) {
     return uint(node.x + width * (node.z + width * node.y));
 }
+
+#ifdef ENTITY_REFLECTION_HISTORY
+    uint entityPoseWord(uint pose, int frame) {
+        return uint(frame & 1) * ENTITY_POSE_WORDS + (pose >> 5u);
+    }
+#endif
 #endif
 #endif
 

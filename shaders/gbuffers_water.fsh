@@ -169,10 +169,11 @@ vec3 translucentReflection(vec3 V, vec3 geoN, vec3 N, vec3 F0, float roughness,
         vec3 radiance = screenColor;
         if (screenWeight < 1.0) {
             float hitDist;
+            uint entityPose;
             vec3 origin = makeCornerSafeRayOrigin(vWorldPos, geoN, V, length(viewPos));
             // A grazing ray can traverse a whole row of occupied water cells without hitting land.
             int smoothSteps = vMatId == 1 ? 2 * VOXEL_RES_XZ + VOXEL_RES_Y : SPECULAR_MAX_STEPS;
-            vec3 voxelColor = traceVoxelReflection(origin, R, roughness, px, smoothSteps, false, hitDist);
+            vec3 voxelColor = traceVoxelReflection(origin, R, roughness, px, smoothSteps, false, hitDist, entityPose);
             radiance = mix(voxelColor, screenColor, screenWeight);
         }
         vec3 weight = useOverrideFresnel ? overrideFresnel : fresnelSchlick(F0, saturate(dot(V, H)));

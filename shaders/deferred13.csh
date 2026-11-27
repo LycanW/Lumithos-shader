@@ -106,16 +106,25 @@ float traceHeldLightShadow(vec3 viewPos, vec3 viewGeoN, vec3 lightViewPos, vec3 
     return 1.0 - 0.82 * maxOcc;
 }
 
-void evalHeldHandLight(int lightVal, int itemId, vec3 handViewPos, GBufferMat mat, vec3 viewPos, vec3 viewDir,
+void evalHeldHandLight(int lightVal, int itemId, int hand, GBufferMat mat, vec3 viewPos, vec3 viewDir,
                        vec3 F0_rgb, bool isMetal, float NdotV, vec3 viewGeoN, float dither,
                        inout vec3 outDiffuse, inout vec3 outSpec) {
     if (lightVal <= 0) return;
 
+    vec3 handViewPos = vec3(hand == 0 ? 0.45 : -0.45, 0.0, 0.0);
+    bool fromModel = false;
+    #ifdef ENTITY_REFLECTIONS_ENABLED
+        if (itemId == HELD_TORCH_ID) {
+            ivec4 moment = entityPool.heldLightMoments[hand];
+            fromModel = moment.w > 0;
+            if (fromModel) handViewPos = vec3(moment.xyz) / float(moment.w);
+        }
+    #endif
     bool isSameHand = mat.isHand && (viewPos.x * handViewPos.x > 0.0);
     vec3 effectiveLightPos;
     if (isSameHand) {
         effectiveLightPos = vec3(0.0);
-    } else if (mat.isHand) {
+    } else if (mat.isHand || fromModel) {
         effectiveLightPos = handViewPos;
     } else {
         effectiveLightPos = handViewPos * smoothstep(0.05, 0.35, -viewPos.z);
@@ -159,7 +168,10 @@ void evalHeldHandLight(int lightVal, int itemId, vec3 handViewPos, GBufferMat ma
         vec3 kD = isMetal ? vec3(0.0) : (1.0 - F);
 
         outDiffuse += mat.albedo * INV_PI * kD * lightRad * (NdotL * vis);
-        outSpec    += F * directGGXLobe(NdotV, NdotL, NdotH, mat.roughness) * lightRad * (NdotL * vis);
+        // Mirror rays already see the torch's emitting pixels.
+        if (!fromModel || mat.isHand || !usesMirrorDirection(mat.roughness)) {
+            outSpec += F * directGGXLobe(NdotV, NdotL, NdotH, mat.roughness) * lightRad * (NdotL * vis);
+        }
     }
 
     if (backNL > 0.0) {
@@ -389,9 +401,9 @@ void main() {
     if (heldBlockLightValue > 0 || heldBlockLightValue2 > 0) {
         vec3 viewGeoN = normalize(mat3(gbufferModelView) * mat.geoNormal);
         float heldDither = stbn2D(px, mat.isHand ? 0 : frameCounter, 14u).x;
-        evalHeldHandLight(heldBlockLightValue,  heldItemId,  vec3( 0.45, 0.0, 0.0), mat, viewPos, viewDir,
+        evalHeldHandLight(heldBlockLightValue,  heldItemId,  0, mat, viewPos, viewDir,
                           F0_rgb, isMetal, NdotV, viewGeoN, heldDither, heldDiffuse, heldSpec);
-        evalHeldHandLight(heldBlockLightValue2, heldItemId2, vec3(-0.45, 0.0, 0.0), mat, viewPos, viewDir,
+        evalHeldHandLight(heldBlockLightValue2, heldItemId2, 1, mat, viewPos, viewDir,
                           F0_rgb, isMetal, NdotV, viewGeoN, fract(heldDither + 0.5), heldDiffuse, heldSpec);
     }
 

@@ -3,6 +3,18 @@
 
 #include "/lib/Resources.glsl"
 
+#ifdef ENTITY_REFLECTION_HISTORY
+uniform sampler2D glossHistoryTex;
+
+bool reflectionPoseChanged(ivec2 trackingPixel, int otherFrame) {
+    vec3 tracking = texelFetch(glossHistoryTex, trackingPixel, 0).xyz;
+    if (tracking.z >= 0.0) return false;
+    uint pose = uint(tracking.x) | (uint(tracking.y) << 11u);
+    uint bits = entityPool.poseBits[entityPoseWord(pose, otherFrame)];
+    return (bits & (1u << (pose & 31u))) == 0u;
+}
+#endif
+
 // Reproject current world position to previous unjittered screen UV.
 vec2 reprojectWorldToPrevUV(vec3 worldPos) {
     vec3 prevWorld = worldPos + cameraVelocity;
@@ -27,13 +39,17 @@ vec2 reprojectScreenUV(vec2 currUV, vec3 worldPos) {
 // - 1-tap exact fast-path when static (zero overhead).
 // - Tile-clamped (`tileOff`) for race-free ping-pong TAA history without cross-tile bleed!
 // - Returns RGB (Catmull-Rom) + A (non-ringing bilinear accumulated frame count).
-vec4 fetchHistoryFast4(sampler2D tex, vec2 uv, ivec2 res, ivec2 tileOff) {
+vec4 fetchHistoryFast4(sampler2D tex, vec2 uv, ivec2 res, ivec2 tileOff, bool validateMirror) {
     vec2 pos = uv * vec2(res) - 0.5;
     ivec2 base = ivec2(floor(pos));
     vec2 f = pos - vec2(base);
 
     if (abs(f.x) < 1e-4 && abs(f.y) < 1e-4) {
         ivec2 p = clamp(base, ivec2(0), res - 1) + tileOff;
+        #ifdef ENTITY_REFLECTION_HISTORY
+            if (validateMirror && reflectionPoseChanged(p + ivec2(0, res.y), frameCounter))
+                return vec4(0.0);
+        #endif
         vec4 tap = texelFetch(tex, p, 0);
         return vec4(max(tap.rgb, vec3(0.0)), max(tap.a, 0.0));
     }
@@ -60,6 +76,24 @@ vec4 fetchHistoryFast4(sampler2D tex, vec2 uv, ivec2 res, ivec2 tileOff) {
     vec4 t21 = texelFetch(tex, ivec2(x2, y1), 0);
     vec4 t12 = texelFetch(tex, ivec2(x1, y2), 0);
     vec4 t22 = texelFetch(tex, ivec2(x2, y2), 0);
+
+    #ifdef ENTITY_REFLECTION_HISTORY
+        if (validateMirror) {
+            bool p11 = !reflectionPoseChanged(ivec2(x1, y1 + res.y), frameCounter);
+            bool p21 = !reflectionPoseChanged(ivec2(x2, y1 + res.y), frameCounter);
+            bool p12 = !reflectionPoseChanged(ivec2(x1, y2 + res.y), frameCounter);
+            bool p22 = !reflectionPoseChanged(ivec2(x2, y2 + res.y), frameCounter);
+            if (!(p11 && p21 && p12 && p22)) {
+                // A vanished pose contributes no history; stationary silhouettes still accumulate coverage.
+                vec4 weights = vec4((1.0-f.x)*(1.0-f.y), f.x*(1.0-f.y), (1.0-f.x)*f.y, f.x*f.y);
+                weights *= vec4(p11, p21, p12, p22);
+                float support = dot(weights, vec4(1.0));
+                if (support <= 1e-4) return vec4(0.0);
+                vec4 value = (t11*weights.x + t21*weights.y + t12*weights.z + t22*weights.w) / support;
+                return vec4(max(value.rgb, vec3(0.0)), max(value.a * support, 0.0));
+            }
+        }
+    #endif
 
     vec3 sum = vec3(0.0);
     sum += max(texelFetch(tex, ivec2(x1, y0), 0).rgb, vec3(0.0)) * (w1.x * w0.y);

@@ -20,6 +20,8 @@ void main() {
         #ifdef ENTITY_REFLECTIONS_ENABLED
             primPool.entityPrimCount = 0u;
             entityPool.texelCount = 0u;
+            entityPool.heldLightMoments[0] = ivec4(0);
+            entityPool.heldLightMoments[1] = ivec4(0);
         #endif
     }
     #ifdef ENTITY_REFLECTIONS_ENABLED
@@ -32,6 +34,10 @@ void main() {
         }
         if (slot < ENTITY_BRICK_WORDS) entityPool.brickBits[slot] = 0u;
         if (slot < ENTITY_SUPER_WORDS) entityPool.superBits[slot] = 0u;
+        #ifdef ENTITY_REFLECTION_HISTORY
+            if (slot < ENTITY_POSE_WORDS)
+                entityPool.poseBits[uint(frameCounter & 1) * ENTITY_POSE_WORDS + slot] = 0u;
+        #endif
     #endif
     if (v.y == 0 && v.z == 0 && v.x < int(LIGHT_CELL_TOTAL)) {
         lightList.cellCount[v.x] = 0u;
