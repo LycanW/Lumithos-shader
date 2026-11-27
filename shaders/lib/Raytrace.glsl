@@ -111,8 +111,19 @@ bool directLightCovers(ivec3 voxel, vec3 receiver, vec3 normal) {
     return sampledEmitterShare(voxel, worldToVoxelPos(receiver), normal, shape) > 0.0;
 }
 
-vec3 indirectHitEmission(TraceHit hit, vec3 receiver, vec3 normal) {
+float coveredHitEmission(TraceHit hit, vec3 receiver) {
     float emission = surfaceEmission(hit.pbrEmission, hit.blockEmission * hit.coverage, hit.f0, hit.albedo);
+    #if EMITTER_RANGE > 0
+        if (emission > 0.0 && beyondEmitterRange(hit.dist)) {
+            vec3 faceNormal = hit.fromTrack2 ? vec3(0.0) : hit.normal;
+            if (!emitterCoversCell(hit.voxel, faceNormal, worldToVoxelPos(receiver))) return 0.0;
+        }
+    #endif
+    return emission;
+}
+
+vec3 indirectHitEmission(TraceHit hit, vec3 receiver, vec3 normal) {
+    float emission = coveredHitEmission(hit, receiver);
     if (emission <= 0.0) return vec3(0.0);
 
     if (hit.blockEmission > 0.0) {

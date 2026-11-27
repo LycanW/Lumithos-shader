@@ -108,7 +108,10 @@ void main() {
             if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * geoNormal) * 0.04, rayDir, 8, stbn2D(bnPx, bnSeq, 9u).x, 0.25, prevHitUV, ssDist, hitVoxel)) {
                 ivec2 hpx = clamp(ivec2(prevHitUV * screenSize()), ivec2(0), res - 1);
                 vec4 prevTap = texelFetch(colortex5, hpx, 0);
-                if ((prevTap.a <= 0.0 || !directLightCovers(hitVoxel, worldPos, shadeNormal))
+                // The screen history bundles emission with reflected light. Use the voxel hit
+                // beyond the source range so its emission can be evaluated independently.
+                bool canReuseEmitter = !beyondEmitterRange(ssDist);
+                if ((prevTap.a <= 0.0 || (canReuseEmitter && !directLightCovers(hitVoxel, worldPos, shadeNormal)))
                     && !any(isnan(prevTap.rgb)) && !any(isinf(prevTap.rgb))) {
                     radiance = min(max(prevTap.rgb, vec3(0.0)), vec3(16.0));
                     hitDist = ssDist;

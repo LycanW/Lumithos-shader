@@ -12,6 +12,21 @@ layout(std430, binding = 4) buffer EmitterGeometry {
     uvec2 triangles[MAX_SCENE_LIGHTS * EMITTER_TRIANGLE_LIMIT]; // Primitive index and cumulative area.
 } emitterGeometry;
 
+bool beyondEmitterRange(float distance) {
+    return EMITTER_RANGE > 0 && distance > float(EMITTER_RANGE);
+}
+
+#if EMITTER_RANGE > 0
+bool emitterCoversCell(ivec3 voxel, vec3 faceNormal, vec3 receiver) {
+    // A full cube emits from a face. Irregular emitters use the owning voxel as their bounds.
+    vec3 sourceMin = vec3(voxel) + max(faceNormal, vec3(0.0));
+    vec3 sourceMax = vec3(voxel) + 1.0 + min(faceNormal, vec3(0.0));
+    vec3 receiverMin = floor(receiver);
+    vec3 gap = max(max(sourceMin - (receiverMin + 1.0), receiverMin - sourceMax), vec3(0.0));
+    return dot(gap, gap) <= float(EMITTER_RANGE * EMITTER_RANGE);
+}
+#endif
+
 bool inEmitterCell(vec3 localPosition, vec3 normal) {
     // Spanning triangles belong to one cell at each sampled point. Allow packed
     // position error on grid-aligned planes, which are registered to one side.

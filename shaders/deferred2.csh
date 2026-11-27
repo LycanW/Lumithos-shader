@@ -83,9 +83,11 @@ vec4 traceSpecularPixel(ivec2 px, ivec2 bnPx, ivec2 res, float depth, float roug
             float ssDist;
             if (screenSpaceTrace(viewPos + (mat3(gbufferModelView) * geoNormal) * 0.04, rayDir, 24, stbn2D(bnPx, frameCounter, 10u).x, 0.25, prevHitUV, ssDist)) {
                 ivec2 hpx = clamp(ivec2(prevHitUV * screenSize()), ivec2(0), res - 1);
-                vec3 prevLit = texelFetch(colortex5, hpx, 0).rgb;
-                if (!any(isnan(prevLit)) && !any(isinf(prevLit))) {
-                    radiance = min(max(prevLit, vec3(0.0)), vec3(12.0));
+                vec4 prevTap = texelFetch(colortex5, hpx, 0);
+                // The voxel path can range-test emission separately from reflected light.
+                if ((!beyondEmitterRange(ssDist) || prevTap.a <= 0.0)
+                    && !any(isnan(prevTap.rgb)) && !any(isinf(prevTap.rgb))) {
+                    radiance = min(max(prevTap.rgb, vec3(0.0)), vec3(12.0));
                     hitDist = ssDist;
                     ssrHit = true;
                 }

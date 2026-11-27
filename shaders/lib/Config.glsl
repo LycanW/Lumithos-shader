@@ -55,6 +55,7 @@
 #define DIFFUSE_MAX_STEPS     64
 #define SPECULAR_MAX_STEPS    96
 #define RC_MAX_STEPS          64
+#define EMITTER_RANGE         40 // Source coverage for diffuse and specular hits in blocks. Zero disables the limit.
 #define SC_MAX_ACCUM_NEAR     48.0
 #define SC_MAX_ACCUM_MID      72.0
 #define SC_MAX_ACCUM_FAR      96.0

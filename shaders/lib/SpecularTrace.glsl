@@ -20,7 +20,7 @@ vec3 traceVoxelReflection(vec3 rayOrig, vec3 rayDir, float roughness, ivec2 bnPx
     TraceHit hit = traceScene(rayOrig, rayDir, maxSpecSteps, specLod, true);
     if (hit.hit) {
         hitDist = hit.dist;
-        float emission = surfaceEmission(hit.pbrEmission, hit.blockEmission * hit.coverage, hit.f0, hit.albedo);
+        float emission = coveredHitEmission(hit, rayOrig);
         radiance += hit.albedo * (emission * EMISSIVE_SCALE);
 
         vec3 lightDir = getShadowLightDir();

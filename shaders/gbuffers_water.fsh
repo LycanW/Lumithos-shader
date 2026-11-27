@@ -112,6 +112,8 @@ float traceTranslucentSSR(vec3 viewPos, vec3 viewR, float dither, out vec3 hitCo
                         vec3 toHit = bHitView - viewPos;
                         float d = length(toHit);
                         if (d > 0.08 && dot(toHit / max(d, 1e-5), viewR) > 0.985) {
+                            // colortex5 marks opaque emitters whose emission is baked into the lit scene.
+                            if (beyondEmitterRange(d) && texelFetch(colortex5, bpx, 0).a > 0.0) return 0.0;
                             hitCol = max(imageLoad(colorimg0, bpx).rgb, vec3(0.0));
                             vec2 edge = min(b.xy, 1.0 - b.xy);
                             if (!any(isnan(hitCol)) && !any(isinf(hitCol))) {
