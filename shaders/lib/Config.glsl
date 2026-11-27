@@ -29,6 +29,8 @@
 // ---- Feature Toggles ----
 // Diffuse tracing resolution: 0 = 1/4 (2x2 Bayer), 1 = 1/2 (Checkerboard), 2 = 1/1 (Full-Res)
 #define DIFFUSE_TRACE_RES 0 // [0 1 2]
+// 0 = 31-frame limit, 1 = 64-frame limit, 2 = frame-rate-scaled limits.
+#define DIFFUSE_HISTORY_MODE 1 // [0 1 2]
 #define SPECULAR_CHECKERBOARD
 //#define DIFFUSE_SSRT
 #define SPECULAR_SSR

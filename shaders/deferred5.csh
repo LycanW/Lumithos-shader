@@ -1,5 +1,8 @@
 #version 430 compatibility
 #include "/lib/LightFilter.glsl"
+#if DIFFUSE_HISTORY_MODE == 2
+uniform float diffuseHistoryFrameTime;
+#endif
 
 layout(local_size_x = 8, local_size_y = 8) in;
 const vec2 workGroupsRender = vec2(1.0, 1.0);
@@ -63,14 +66,13 @@ History lookup(sampler2D source,Footprint b,bool glossy) {
     return h;
 }
 
-void updateMeans(History h, vec4 sampleValue, float age, float observation, float confidence,
+void updateMeans(History h, vec4 sampleValue, float age, float observation, float confidence, vec2 maxAges,
                  out vec4 slow, out vec4 fast) {
     if(sampleValue.a<0.0) {slow=h.slow;fast=h.fast;return;}
-    float a=h.support>0.0 ? max(1.0-confidence,temporalGain(age,30.0,1.0))*observation : 1.0;
-    float b=h.support>0.0 ? max(1.0-confidence,temporalGain(age,6.0,1.0))*observation : 1.0;
+    vec2 weights=h.support>0.0 ? max(vec2(1.0-confidence),1.0/min(vec2(age),maxAges))*observation : vec2(1.0);
     float y=luma(sampleValue.rgb);
-    slow=vec4(mix(h.slow.rgb,sampleValue.rgb,a),age);
-    fast=vec4(mix(h.fast.rgb,sampleValue.rgb,b),mix(h.fast.a,y*y,a));
+    slow=vec4(mix(h.slow.rgb,sampleValue.rgb,weights.x),age);
+    fast=vec4(mix(h.fast.rgb,sampleValue.rgb,weights.y),mix(h.fast.a,y*y,weights.x));
 }
 
 void main() {
@@ -95,20 +97,32 @@ void main() {
     float noV=abs(dot(toEye,s.normal));
     float noVprev=abs(dot(mat3(gbufferPreviousModelView)*s.normal,oldEye));
     float stretch=min(1.0,pow((noVprev+0.001)/(noV+0.001),4.0));
-    float age=nextHistoryAge(diffuse.slow.a,diffuse.support*mix(0.1,1.0,stretch));
+    const vec2 legacyLimits=vec2(31.0,7.0);
+    vec2 diffuseLimits=legacyLimits;
+    #if DIFFUSE_HISTORY_MODE > 0
+        diffuseLimits.x=64.0;
+    #endif
+    #if DIFFUSE_HISTORY_MODE == 2
+        float relativeFps=1.0/(60.0*max(diffuseHistoryFrameTime,0.001));
+        vec2 scaledFrames=round((diffuseLimits-1.0)*relativeFps);
+        diffuseLimits=1.0+clamp(scaledFrames,vec2(1.0,0.0),vec2(254.0));
+    #endif
+    float coverage=diffuse.support*mix(0.1,1.0,stretch);
+    float age=nextHistoryAge(diffuse.slow.a,coverage,diffuseLimits.x);
     float cadence=15.0*clamp(0.01666/max(frameTime,0.0001),0.25,4.0);
     float inferred=mix(1.0/(1.0+cadence),0.5,jitterDelta);
     float obs=age<=1.0 || diffuseField(p) ? 1.0 : inferred;
     vec4 slow,fast;
-    updateMeans(diffuse,texelFetch(diffuseWorkTex,workPixel(p,2),0),age,obs,1.0,slow,fast);
+    updateMeans(diffuse,texelFetch(diffuseWorkTex,workPixel(p,2),0),age,obs,1.0,diffuseLimits,slow,fast);
     imageStore(diffuseWorkImg,p,slow); imageStore(diffuseWorkImg,workPixel(p,1),fast);
     #ifdef SPECULAR_REFLECTIONS
         vec4 tracking=vec4(0.0);
         slow=vec4(0.0);fast=vec4(0.0);
         if(s.z>0.0 && s.rough>=0.0) {
+            float glossAge=nextHistoryAge(min(diffuse.slow.a,legacyLimits.x),coverage,legacyLimits.x);
             vec4 value=texelFetch(glossWorkTex,workPixel(p,2),0);
             History real=lookup(glossHistoryTex,surface,true);
-            obs=age<=1.0 || glossTraced(p) ? 1.0 : inferred;
+            obs=glossAge<=1.0 || glossTraced(p) ? 1.0 : inferred;
             float dominant=dominantFraction(s.rough,noV);
             vec3 D=normalize(mix(s.normal,reflect(-toEye,s.normal),dominant));
             float distance=max(value.a,0.0);
@@ -138,8 +152,8 @@ void main() {
             float virtualConfidence=virt.support*exp(-historyConsistency/max(0.1,aperture))*(1.0-smoothstep(0.0,lobePixels+0.25,length(oldHitPixel-virtualPixel)));
             float blend=dominant*min(1.0,virtualConfidence/max(surfaceConfidence,1e-5));
             vec4 vSlow,vFast;
-            updateMeans(real,value,age,obs,surfaceConfidence,slow,fast);
-            updateMeans(virt,value,age,obs,virtualConfidence,vSlow,vFast);
+            updateMeans(real,value,glossAge,obs,surfaceConfidence,legacyLimits,slow,fast);
+            updateMeans(virt,value,glossAge,obs,virtualConfidence,legacyLimits,vSlow,vFast);
             slow=mix(slow,vSlow,blend);fast=mix(fast,vFast,blend);
             float confidence=mix(surfaceConfidence,virtualConfidence,blend);
             float tracked=mix(real.distances.y,virt.distances.y,blend);

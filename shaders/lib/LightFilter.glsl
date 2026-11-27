@@ -89,12 +89,8 @@ bool diffuseField(ivec2 p) {
     #endif
 }
 
-float nextHistoryAge(float previousAge, float coverage) {
-    return clamp((previousAge + 1.0) * sqrt(clamp(coverage, 0.0, 1.0)), 1.0, 31.0);
-}
-
-float temporalGain(float age, float cap, float observation) {
-    return observation / clamp(age, 1.0, cap + 1.0);
+float nextHistoryAge(float previousAge, float coverage, float maxAge) {
+    return clamp((previousAge + 1.0) * sqrt(clamp(coverage, 0.0, 1.0)), 1.0, maxAge);
 }
 
 float signalVariance(float mean, float secondMoment) {
