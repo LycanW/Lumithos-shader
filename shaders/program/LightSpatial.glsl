@@ -2,6 +2,10 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 const vec2 workGroupsRender = vec2(1.0, 1.0);
 
+#ifndef GLOSS_FILTER_STEP
+    #define GLOSS_FILTER_STEP FILTER_STEP
+#endif
+
 #ifdef FILTER_RESOLVE
 layout(rgba32f) uniform writeonly image2D exposureImg;
 layout(rgba16f) uniform writeonly image2D colorimg3, colorimg4;
@@ -59,6 +63,12 @@ void addTap(inout WaveletSum result,vec4 tap,float weight) {
     result.weight+=w;
     result.weighted+=vec4(w*tap.rgb,w*w*tap.a);
 }
+#ifdef SPECULAR_REFLECTIONS
+void addGlossTap(inout WaveletSum result,ivec2 tap,FilterSurface s,FilterSurface neighbor,float weight,float confidence) {
+    float cosine=mix(dot(s.normal,neighbor.normal),1.0,0.3*(1.0-confidence));
+    addTap(result,texelFetch(glossWorkTex,tap,0),weight*glossWeight(s.rough,neighbor.rough,cosine));
+}
+#endif
 vec4 resolveSum(WaveletSum result,vec4 fallback) {
     float w=result.weight;
     return w>1e-4 ? result.weighted/vec4(vec3(w),w*w) : fallback;
@@ -94,15 +104,23 @@ void main() {
         #endif
         for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x) {
             if(x==0 && y==0) continue;
-            ivec2 delta=ivec2(x,y)*FILTER_STEP,q=p+delta;
-            if(!inFrame(q)) continue;
-            FilterSurface neighbor=filterSurface(q);
-            float w=float((2-abs(x))*(2-abs(y)))*surfaceWeight(s,neighbor,plane,delta);
-            addTap(d,texelFetch(diffuseWorkTex,src+delta,0),w);
-            #ifdef SPECULAR_REFLECTIONS
-                if(s.rough>=0.0) {
-                    float cosine=mix(dot(s.normal,neighbor.normal),1.0,0.3*(1.0-confidence));
-                    addTap(g,texelFetch(glossWorkTex,src+delta,0),w*glossWeight(s.rough,neighbor.rough,cosine));
+            ivec2 offset=ivec2(x,y);
+            float kernel=float((2-abs(x))*(2-abs(y)));
+            ivec2 delta=offset*FILTER_STEP,q=p+delta;
+            if(inFrame(q)) {
+                FilterSurface neighbor=filterSurface(q);
+                float w=kernel*surfaceWeight(s,neighbor,plane,delta);
+                addTap(d,texelFetch(diffuseWorkTex,src+delta,0),w);
+                #if defined(SPECULAR_REFLECTIONS) && FILTER_STEP == GLOSS_FILTER_STEP
+                    if(s.rough>=0.0) addGlossTap(g,src+delta,s,neighbor,w,confidence);
+                #endif
+            }
+            #if defined(SPECULAR_REFLECTIONS) && FILTER_STEP != GLOSS_FILTER_STEP
+                ivec2 glossDelta=offset*GLOSS_FILTER_STEP,glossPixel=p+glossDelta;
+                if(s.rough>=0.0 && inFrame(glossPixel)) {
+                    FilterSurface neighbor=filterSurface(glossPixel);
+                    float w=kernel*surfaceWeight(s,neighbor,plane,glossDelta);
+                    addGlossTap(g,src+glossDelta,s,neighbor,w,confidence);
                 }
             #endif
         }

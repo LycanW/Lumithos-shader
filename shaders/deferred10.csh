@@ -1,5 +1,6 @@
 #version 430 compatibility
-#define FILTER_STEP 4
+#define FILTER_STEP 23
+#define GLOSS_FILTER_STEP 4
 #define FILTER_SOURCE 1
 #define FILTER_DEST 0
 #include "/program/LightSpatial.glsl"
