@@ -362,12 +362,10 @@ void main() {
         if (!isMetal) kD_direct = 1.0 - F;
     }
 
-    // First-person hand bypasses temporal accumulation (RELAX and TAA) for zero swing ghosting,
-    // so shade hand indirect GI directly from smooth 2x2-bilinear L1 SH Radiance Cache (0% noise/jitter!).
+    // The first-person hand uses sky ambient for indirect light.
     vec3 diffuseGI;
     if (mat.isHand) {
-        vec3 skyAmb = evalSky(mat.shadeNormal, false) * (0.15 + 0.85 * mat.skyLight);
-        diffuseGI = queryRadianceCacheSmooth(worldPos, mat.shadeNormal, skyAmb, 0u, vec2(0.5));
+        diffuseGI = evalSky(mat.shadeNormal, false) * (0.15 + 0.85 * mat.skyLight);
     } else {
         diffuseGI = max(texelFetch(colortex3, px, 0).rgb, vec3(0.0));
     }
@@ -422,7 +420,7 @@ void main() {
     #elif DEBUG_VIEW == 3
         finalLit = specularGI;
     #elif DEBUG_VIEW == 4
-        finalLit = queryRadianceCache(worldPos, mat.geoNormal, 0u, false);
+        finalLit = mat.isHand ? diffuseGI : queryRadianceCache(worldPos, mat.geoNormal, 0u, false);
     #elif DEBUG_VIEW == 5
         ivec3 vCoord = ivec3(floor(worldToVoxelPos(worldPos - mat.geoNormal * 0.05)));
         vec3 dbg = vec3(0.05, 0.05, 0.15);
