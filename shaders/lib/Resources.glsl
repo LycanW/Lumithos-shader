@@ -127,11 +127,35 @@ struct ScenePrim {
 
 layout(std430, binding = 1) coherent buffer PrimPoolBuffer {
     uint primCount;
-    uint pad0;
+    uint entityPrimCount;
     uint pad1;
     uint pad2;
     ScenePrim prims[];
 } primPool;
+
+// Iris discovers boolean shader options through #ifdef and #ifndef.
+#ifdef ENTITY_REFLECTIONS
+#ifdef SPECULAR_REFLECTIONS
+#define ENTITY_REFLECTIONS_ENABLED
+const uint MAX_ENTITY_PRIMITIVES = 16384u;
+const uint ENTITY_TEXEL_CAPACITY = 1048576u;
+const uint ENTITY_BRICK_WORDS = (BRICK_RES_XZ * BRICK_RES_XZ * BRICK_RES_Y + 31) / 32;
+const uint ENTITY_SUPER_WORDS = (SUPER_RES_XZ * SUPER_RES_XZ * SUPER_RES_Y + 31) / 32;
+
+layout(std430, binding = 5) coherent buffer EntityPoolBuffer {
+    uint texelCount;
+    uint heads[TOTAL_VOXELS];
+    uint occupiedSlots[MAX_ENTITY_PRIMITIVES]; // Cell of each list's first primitive, TOTAL_VOXELS otherwise.
+    uint brickBits[ENTITY_BRICK_WORDS];
+    uint superBits[ENTITY_SUPER_WORDS];
+    uint texels[ENTITY_TEXEL_CAPACITY];
+} entityPool;
+
+uint entityNodeIndex(ivec3 node, int width) {
+    return uint(node.x + width * (node.z + width * node.y));
+}
+#endif
+#endif
 
 // ---- World-Space 4-Way Set-Associative Surface Hash Cache (16 bytes/entry, 64B cache-line buckets!) ----
 // key:  cell.x(9b) | cell.y(9b) | cell.z(9b) | (faceIdx+1)(3b: 1..6, 0=empty) | lod(2b: 0..3)

@@ -26,11 +26,22 @@ void main() {
     surfacePool.surfaces[slot].tintAndSky = 0u;
     surfacePool.surfaces[slot].primHead   = PRIM_END;
 
+    #ifdef ENTITY_REFLECTIONS_ENABLED
+        entityPool.heads[slot] = PRIM_END;
+        if (slot < MAX_ENTITY_PRIMITIVES) entityPool.occupiedSlots[slot] = TOTAL_VOXELS;
+        if (slot < ENTITY_BRICK_WORDS) entityPool.brickBits[slot] = 0u;
+        if (slot < ENTITY_SUPER_WORDS) entityPool.superBits[slot] = 0u;
+    #endif
+
     if (slot < SC_TOTAL_SLOTS) {
         scTable.entries[slot] = SurfaceCacheEntry(0u, 0u, uvec2(0u));
     }
     if (slot == 0u) {
         primPool.primCount = 0u;
         lightList.lightCount = 0u;
+        #ifdef ENTITY_REFLECTIONS_ENABLED
+            primPool.entityPrimCount = 0u;
+            entityPool.texelCount = 0u;
+        #endif
     }
 }

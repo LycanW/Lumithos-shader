@@ -1,9 +1,7 @@
 #version 430 compatibility
 
-// Dual-purpose Shadow + Direct-Addressed Hybrid Dual-Track Voxelization Geometry Shader:
-// - ZERO spinlocks, ZERO retry caps, ZERO imageAtomicCompSwap, ZERO dropped faces!
-// - Track 1: O(1) 6-Face Full-Cube + exact 8-way UV rotation/mirroring + 1/512 normalized atlas origin.
-// - Track 2: Full AABB cross-voxel registration for Non-Cube / Stairs / Slabs / Fences / Mod Models.
+// Shadow rendering and voxelization. Full block faces use Track 1 descriptors.
+// Irregular blocks and entities register their triangles in the cells they overlap.
 #define STAGE_VOXEL_GRID_WRITE
 #include "/lib/SceneGeo.glsl"
 
@@ -47,7 +45,61 @@ void registerEmissiveVoxel(uint slot, ivec3 vCoord, uint emissive4) {
     }
 }
 
-void voxelizeTerrainTriangle(bool isWater) {
+#ifdef ENTITY_REFLECTIONS_ENABLED
+// Save the texture bound for this draw before the shadow pass moves on to another model.
+bool captureEntityTexture(out vec2 uv[3], out uint texturePatch) {
+    ivec2 sourceSize = textureSize(gtexture, 0);
+    if (any(lessThanEqual(sourceSize, ivec2(0)))) return false;
+
+    vec2 minPx = min(vTexCoord[0], min(vTexCoord[1], vTexCoord[2])) * vec2(sourceSize);
+    vec2 maxPx = max(vTexCoord[0], max(vTexCoord[1], vTexCoord[2])) * vec2(sourceSize);
+    ivec2 lo = clamp(ivec2(floor(minPx)), ivec2(0), sourceSize - 1);
+    ivec2 hi = clamp(ivec2(ceil(maxPx)) - 1, lo, sourceSize - 1);
+    ivec2 span = hi - lo + 1;
+    ivec2 size = min(span, ivec2(64));
+    uint count = uint(size.x * size.y);
+    uint offset = atomicAdd(entityPool.texelCount, count);
+    if (offset > ENTITY_TEXEL_CAPACITY - count) return false;
+
+    float alpha = (vColor[0].a + vColor[1].a + vColor[2].a) * (1.0 / 3.0);
+    for (int y = 0; y < size.y; ++y) {
+        for (int x = 0; x < size.x; ++x) {
+            ivec2 texel = lo + ((2 * ivec2(x, y) + 1) * span) / (2 * size);
+            vec4 rgba = texelFetch(gtexture, texel, 0);
+            rgba.a *= alpha;
+            entityPool.texels[offset + uint(x + y * size.x)] = packUnorm4x8(rgba);
+        }
+    }
+    for (int i = 0; i < 3; ++i) uv[i] = (vTexCoord[i] * vec2(sourceSize) - vec2(lo)) / vec2(span);
+    // 20-bit texel offset followed by the two 6-bit extents minus one.
+    texturePatch = offset | (uint(size.x - 1) << 20u) | (uint(size.y - 1) << 26u);
+    return true;
+}
+
+bool registerEntityTriangle(ivec3 cell, uint slot, vec3 local0, vec3 e1, vec3 e2,
+                            vec2 uv[3], vec3 tint, uint sky, uint texturePatch) {
+    uint localIndex = atomicAdd(primPool.entityPrimCount, 1u);
+    if (localIndex >= MAX_ENTITY_PRIMITIVES) return false;
+
+    uint index = MAX_PRIMITIVES + localIndex;
+    uint next = atomicExchange(entityPool.heads[slot], index);
+    ScenePrim prim = packScenePrim(local0, e1, e2, uv[0], uv[1], uv[2], tint, sky, false, false, next);
+    prim.meta.w = texturePatch;
+    primPool.prims[index] = prim;
+
+    // Record each occupied cell once for both traversal and next frame's clear.
+    if (next == PRIM_END) {
+        entityPool.occupiedSlots[localIndex] = slot;
+        uint brick = entityNodeIndex(cell >> 2, BRICK_RES_XZ);
+        uint super = entityNodeIndex(cell >> 4, SUPER_RES_XZ);
+        atomicOr(entityPool.brickBits[brick >> 5u], 1u << (brick & 31u));
+        atomicOr(entityPool.superBits[super >> 5u], 1u << (super & 31u));
+    }
+    return true;
+}
+#endif
+
+void voxelizeTriangle(bool isWater, bool isEntity) {
     vec3 vp0 = vVoxelPos[0];
     vec3 vp1 = vVoxelPos[1];
     vec3 vp2 = vVoxelPos[2];
@@ -81,7 +133,7 @@ void voxelizeTerrainTriangle(bool isWater) {
     vec3 localSum = vec3(0.0);
 
     // Keep water on Track 2 even for flat faces so its material tag and biome tint are per triangle.
-    if (!isWater && inVoxelBounds(vCoord) && maxOf(abs(faceNormal)) > 0.999) {
+    if (!isWater && !isEntity && inVoxelBounds(vCoord) && maxOf(abs(faceNormal)) > 0.999) {
         vec3 local0 = vp0 - vec3(vCoord);
         vec3 local1 = vp1 - vec3(vCoord);
         vec3 local2 = vp2 - vec3(vCoord);
@@ -155,16 +207,28 @@ void voxelizeTerrainTriangle(bool isWater) {
     // Inset AABB by 1e-4 so single-voxel quads touching [0, 1] (like ladders!) register ONLY
     // in their true owning voxel instead of spilling into 4 neighbors (4x less primPool load!),
     // while genuinely cross-voxel geometry still registers in every voxel it overlaps.
-    vec3 triMin = min(vp0, min(vp1, vp2)) - faceNormal * 0.002 + vec3(1e-4);
-    vec3 triMax = max(vp0, max(vp1, vp2)) - faceNormal * 0.002 - vec3(1e-4);
+    // Entity surfaces may lie exactly on a cell boundary and have no owning block.
+    vec3 triMin = isEntity ? rawMin - vec3(1e-4) : rawMin - faceNormal * 0.002 + vec3(1e-4);
+    vec3 triMax = isEntity ? rawMax + vec3(1e-4) : rawMax - faceNormal * 0.002 - vec3(1e-4);
     triMax = max(triMax, triMin);
     ivec3 gridMax = ivec3(VOXEL_RES_XZ - 1, VOXEL_RES_Y - 1, VOXEL_RES_XZ - 1);
     ivec3 cellMin = max(ivec3(floor(triMin)), ivec3(0));
     ivec3 cellMax = min(ivec3(floor(triMax)), gridMax);
     if (any(greaterThan(cellMin, cellMax))) return;
 
-    cellMax = min(cellMax, cellMin + ivec3(1));
+    if (!isEntity) cellMax = min(cellMax, cellMin + ivec3(1));
     float planeLimit = dot(abs(faceNormal), vec3(0.5)) + 0.01;
+    if (maxOf(abs(e1)) > 1.99 || maxOf(abs(e2)) > 1.99) return;
+
+    #ifdef ENTITY_REFLECTIONS_ENABLED
+        vec2 entityUV[3];
+        uint texturePatch = 0u;
+        uint entitySky = 0u;
+        if (isEntity) {
+            if (!captureEntityTexture(entityUV, texturePatch)) return;
+            entitySky = uint(round(saturate(avgSky) * 15.0));
+        }
+    #endif
 
     for (int vz = cellMin.z; vz <= cellMax.z; ++vz) {
         for (int vy = cellMin.y; vy <= cellMax.y; ++vy) {
@@ -174,9 +238,15 @@ void voxelizeTerrainTriangle(bool isWater) {
                 if (abs(dot(voxelCenter - vp0, faceNormal)) > planeLimit) continue;
 
                 vec3 local0 = vp0 - vec3(c);
-                if (maxOf(abs(local0)) > 1.99 || maxOf(abs(e1)) > 1.99 || maxOf(abs(e2)) > 1.99) continue;
+                if (maxOf(abs(local0)) > 1.99) continue;
 
                 uint slot = voxelLinearIndex(c);
+                #ifdef ENTITY_REFLECTIONS_ENABLED
+                    if (isEntity) {
+                        if (!registerEntityTriangle(c, slot, local0, e1, e2, entityUV, avgColor, entitySky, texturePatch)) return;
+                        continue;
+                    }
+                #endif
                 imageStore(voxelGridImg, c, uvec4(1u));
                 if (!isWater) {
                     writeTintAndSky(slot, avgColor, avgSky, isTinted, emissive4);
@@ -204,8 +274,13 @@ void main() {
                   || (renderStage == MC_RENDER_STAGE_TERRAIN_TRANSLUCENT);
     bool isWater = renderStage == MC_RENDER_STAGE_TERRAIN_TRANSLUCENT && vIsWater[0] != 0;
     if (isTerrain) {
-        voxelizeTerrainTriangle(isWater);
+        voxelizeTriangle(isWater, false);
     }
+    #ifdef ENTITY_REFLECTIONS_ENABLED
+        else if (renderStage == MC_RENDER_STAGE_ENTITIES) {
+            voxelizeTriangle(false, true);
+        }
+    #endif
 
     vec3 cMin = min(vShadowClip[0].xyz, min(vShadowClip[1].xyz, vShadowClip[2].xyz));
     vec3 cMax = max(vShadowClip[0].xyz, max(vShadowClip[1].xyz, vShadowClip[2].xyz));

@@ -175,7 +175,26 @@ vec3 makeCornerSafeRayOrigin(vec3 worldPos, vec3 geoNormal, vec3 toCam, float ca
 // Hybrid 64-Way Hierarchical DDA (16x16x16 -> 4x4x4 -> 1x1x1) with Stained-Glass Transmission
 // Track 1: O(1) Full-Cube 6-Face Descriptor with exact 8-way UV rotation/mirroring
 // Track 2: Exact Triangle Intersection for Non-Cube / Custom / Mod Geometry
-TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod, bool passTranslucent) {
+#ifdef ENTITY_REFLECTIONS_ENABLED
+bool entitySuperOccupied(ivec3 voxel) {
+    uint node = entityNodeIndex(voxel >> 4, SUPER_RES_XZ);
+    return (entityPool.superBits[node >> 5u] & (1u << (node & 31u))) != 0u;
+}
+
+bool entityBrickOccupied(ivec3 voxel) {
+    uint node = entityNodeIndex(voxel >> 2, BRICK_RES_XZ);
+    return (entityPool.brickBits[node >> 5u] & (1u << (node & 31u))) != 0u;
+}
+
+vec4 sampleEntityPatch(uint texturePatch, vec2 uv) {
+    ivec2 size = ivec2(uvec2(texturePatch >> 20u, texturePatch >> 26u) & 63u) + 1;
+    ivec2 texel = clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1);
+    uint offset = texturePatch & 0xfffffu;
+    return unpackUnorm4x8(entityPool.texels[offset + uint(texel.x + texel.y * size.x)]);
+}
+#endif
+
+TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod, bool passTranslucent, bool includeEntities) {
     TraceHit result = makeMissHit();
     vec3 throughput = vec3(1.0);
 
@@ -245,17 +264,30 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
 
         // ---- Level 2: 16x16x16 Super-Brick Skip (1.1 KB, L1 resident) ----
         int shift = 0;
-        if (texelFetch(superOccTex, vCoord >> 4, 0).r == 0u) {
+        if (texelFetch(superOccTex, vCoord >> 4, 0).r == 0u
+            #ifdef ENTITY_REFLECTIONS_ENABLED
+                && !(includeEntities && entitySuperOccupied(vCoord))
+            #endif
+        ) {
             shift = 4;
         }
         // ---- Level 1: 4x4x4 Brick Skip (73 KB, L2 resident) ----
-        else if (texelFetch(brickOccTex, vCoord >> 2, 0).r == 0u) {
+        else if (texelFetch(brickOccTex, vCoord >> 2, 0).r == 0u
+            #ifdef ENTITY_REFLECTIONS_ENABLED
+                && !(includeEntities && entityBrickOccupied(vCoord))
+            #endif
+        ) {
             shift = 2;
         }
         // ---- Level 0: Exact Voxel Cell ----
         else {
-            if (texelFetch(voxelGridTex, vCoord, 0).r != 0u) {
-                uint slot = voxelLinearIndex(vCoord);
+            uint slot = voxelLinearIndex(vCoord);
+            #ifdef ENTITY_REFLECTIONS_ENABLED
+                uint entityHead = includeEntities ? entityPool.heads[slot] : PRIM_END;
+            #else
+                const uint entityHead = PRIM_END;
+            #endif
+            if (texelFetch(voxelGridTex, vCoord, 0).r != 0u || entityHead != PRIM_END) {
                 SurfaceVoxel sv = readSurface(slot);
 
                 // Compute voxel exit distance to bound primitive tests cleanly.
@@ -309,7 +341,8 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
 
                 // --- Track 2: Exact Non-Cube Primitives (Lazy 24B Geo Unpack + Post-Loop Shading) ---
                 uint primIdx = sv.primHead;
-                if (primIdx != PRIM_END) {
+                uint nextEntity = foundHit ? PRIM_END : entityHead;
+                if (primIdx != PRIM_END || nextEntity != PRIM_END) {
                     vec3 localOrig = vOrigin - vec3(vCoord);
                     bool hitTrans = false;
                     float bestTransT = bestT;
@@ -321,36 +354,52 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                     vec4 bestTex = vec4(0.0);
                     vec3 bestTintSrgb = vec3(1.0);
                     float bestPrimEmit = 0.0;
+                    #ifdef ENTITY_REFLECTIONS_ENABLED
+                        bool bestEntity = false;
+                    #endif
                     #ifdef TRACE_HIGH_PRIM_GUARD
                         const int maxPrims = 256;
                     #else
                         const int maxPrims = 48;
                     #endif
-                    for (int guard = 0; guard < maxPrims && primIdx != PRIM_END; ++guard) {
+                    // Each list has its own traversal budget.
+                    for (int guard = 0; ; ++guard) {
+                        if (guard >= maxPrims || primIdx == PRIM_END) {
+                            if (nextEntity == PRIM_END) break;
+                            primIdx = nextEntity;
+                            nextEntity = PRIM_END;
+                            guard = 0;
+                        }
                         uint curIdx = primIdx;
+                        #ifdef ENTITY_REFLECTIONS_ENABLED
+                            bool entity = curIdx >= MAX_PRIMITIVES;
+                        #endif
                         vec3 p0, e1, e2;
                         uint nextIdx;
                         unpackScenePrimGeo(curIdx, p0, e1, e2, nextIdx);
-#ifdef TRACE_REFLECTION_QUADS
-                        uint link = primPool.prims[curIdx].meta.z;
-                        primIdx = link & PRIM_END;
-                        if ((link & 0x80000000u) != 0u && guard + 1 < maxPrims) {
-                            uint bounds = primPool.prims[curIdx].meta.w;
-                            uvec3 lo = uvec3(bounds, bounds >> 7u, bounds >> 14u) & 127u;
-                            uvec3 hi = uvec3(bounds >> 21u, (bounds >> 28u) | ((link >> 21u) << 4u), link >> 24u) & 127u;
-                            // Test in grid space so the exact triangle path keeps its own local-origin precision.
-                            // Expand the bounds for quantization and the barycentric edge tolerance.
-                            vec3 t0 = ((vec3(vCoord) + vec3(lo) * (1.0 / 31.0) - 2.002) - vOrigin) * invDir;
-                            vec3 t1 = ((vec3(vCoord) + vec3(hi) * (1.0 / 31.0) - 1.998) - vOrigin) * invDir;
-                            float enter = maxOf(min(t0, t1)), leave = minOf(max(t0, t1));
-                            if (leave < 0.0 || enter > bestT + 0.002 || enter > leave) {
-                                ++guard; // The original list budget counts both triangles.
-                                continue;
-                            }
-                            primIdx = nextIdx;
-                        }
-#else
                         primIdx = nextIdx;
+#ifdef TRACE_REFLECTION_QUADS
+                        #ifdef ENTITY_REFLECTIONS_ENABLED
+                            if (!entity)
+                        #endif
+                        {
+                            uint link = primPool.prims[curIdx].meta.z;
+                            primIdx = link & PRIM_END;
+                            if ((link & 0x80000000u) != 0u && guard + 1 < maxPrims) {
+                                uint bounds = primPool.prims[curIdx].meta.w;
+                                uvec3 lo = uvec3(bounds, bounds >> 7u, bounds >> 14u) & 127u;
+                                uvec3 hi = uvec3(bounds >> 21u, (bounds >> 28u) | ((link >> 21u) << 4u), link >> 24u) & 127u;
+                                // Test in grid space, expanding for quantization and barycentric edge tolerance.
+                                vec3 t0 = ((vec3(vCoord) + vec3(lo) * (1.0 / 31.0) - 2.002) - vOrigin) * invDir;
+                                vec3 t1 = ((vec3(vCoord) + vec3(hi) * (1.0 / 31.0) - 1.998) - vOrigin) * invDir;
+                                float enter = maxOf(min(t0, t1)), leave = minOf(max(t0, t1));
+                                if (leave < 0.0 || enter > bestT + 0.002 || enter > leave) {
+                                    ++guard; // The original list budget counts both triangles.
+                                    continue;
+                                }
+                                primIdx = nextIdx;
+                            }
+                        }
 #endif
 
                         vec3 pvec = cross(safeDir, e2);
@@ -368,6 +417,9 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
 
                         float t = dot(e2, qvec) * invDet;
                         if (t <= 1e-4 || t >= bestT) continue;
+                        #ifdef ENTITY_REFLECTIONS_ENABLED
+                            if (entity && t < tCur - 1e-3) continue;
+                        #endif
 
                         // Defer UV/tint/material decode until ray actually intersects this triangle!
                         vec2 uv0, uv1, uv2;
@@ -377,7 +429,12 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                         unpackScenePrimShade(curIdx, uv0, uv1, uv2, tintSrgb, primEmit, primTrans, primWater);
 
                         vec2 hitUV = uv0 * (1.0 - u - v) + uv1 * u + uv2 * v;
-                        vec4 tex = primWater ? vec4(1.0) : textureLod(colortex14, hitUV, atlasLod);
+                        vec4 tex;
+                        #ifdef ENTITY_REFLECTIONS_ENABLED
+                            if (entity) tex = sampleEntityPatch(primPool.prims[curIdx].meta.w, hitUV);
+                            else
+                        #endif
+                        tex = primWater ? vec4(1.0) : textureLod(colortex14, hitUV, atlasLod);
                         if (!primWater && tex.a < 0.1) continue;
 
                         if (passTranslucent && (primWater || (primTrans && primEmit <= 0.0 && tex.a < 0.98))) {
@@ -398,6 +455,9 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                         bestTex = vec4(tex.rgb, primTrans ? tex.a : 1.0);
                         bestTintSrgb = tintSrgb;
                         bestPrimEmit = primEmit;
+                        #ifdef ENTITY_REFLECTIONS_ENABLED
+                            bestEntity = entity;
+                        #endif
                     }
                     if (foundT2) {
                         vec3 rawCross = cross(bestE1, bestE2);
@@ -405,7 +465,16 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                         vec3 triN = rawCross / max(2.0 * triArea, 1e-6);
                         if (dot(triN, safeDir) > 0.0) triN = -triN;
 
-                        readHitMaterial(result, bestHitUV, specTexSize, bestTex.rgb * bestTintSrgb, bestPrimEmit, bestTex.a);
+                        #ifdef ENTITY_REFLECTIONS_ENABLED
+                            if (bestEntity) {
+                                result.albedo = srgbToLinear(bestTex.rgb * bestTintSrgb);
+                                result.skyLight = bestPrimEmit; // Entity primitives store sky light in this field.
+                            } else
+                        #endif
+                        {
+                            readHitMaterial(result, bestHitUV, specTexSize, bestTex.rgb * bestTintSrgb, bestPrimEmit, bestTex.a);
+                            result.skyLight = unpackSky(sv.tintAndSky);
+                        }
 
                         foundHit = true;
                         result.hit = true;
@@ -413,7 +482,6 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
                         result.dist = bestT;
                         result.worldPos = voxelToWorldPos(vOrigin + safeDir * bestT);
                         result.normal = triN;
-                        result.skyLight = unpackSky(sv.tintAndSky);
                     }
                     if (hitTrans && bestTransT < bestT) {
                         throughput *= transFilter;
@@ -468,6 +536,10 @@ TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod,
         result.dist = tCur;
     }
     return result;
+}
+
+TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod, bool passTranslucent) {
+    return traceScene(worldOrigin, rayDir, maxSteps, atlasLod, passTranslucent, false);
 }
 
 TraceHit traceScene(vec3 worldOrigin, vec3 rayDir, int maxSteps, float atlasLod) {

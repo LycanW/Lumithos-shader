@@ -28,7 +28,7 @@ vec3 traceVoxelReflection(vec3 rayOrig, vec3 rayDir, float roughness, ivec2 bnPx
     for (int bounce = 0; bounce < SPECULAR_BOUNCES; ++bounce) {
         float specLod = roughness < 0.25 ? 0.0 : 1.0;
         int maxSpecSteps = roughness < 0.22 ? smoothSteps : 48;
-        TraceHit hit = traceScene(rayOrig, rayDir, maxSpecSteps, specLod, true);
+        TraceHit hit = traceScene(rayOrig, rayDir, maxSpecSteps, specLod, true, true);
         throughput *= hit.throughput;
         // The spatial filter reconstructs the first hit position along the original ray.
         if (bounce == 0) hitDist = hit.hit ? hit.dist : (hit.exitedGrid ? 65504.0 : 0.0);

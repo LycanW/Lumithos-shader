@@ -39,6 +39,7 @@
 #define SPECULAR_SSR
 #define PATH_GUIDING
 #define SPECULAR_REFLECTIONS
+#define ENTITY_REFLECTIONS
 #define TAA_ENABLED
 // Tonemapper: 0 = AgX (Default), 1 = GT7, 2 = PBR Neutral, 3 = ACES
 #define TONEMAP_MODE 0 // [0 1 2 3]
