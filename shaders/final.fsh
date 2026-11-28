@@ -38,9 +38,10 @@ void main() {
     #elif DEBUG_VIEW != 0
         vec3 display = linearToSrgb(applyTonemap(hdr * float(EXPOSURE)));
     #else
-        vec3 display = cameraDisplayColor(hdr, scratchTex, px, res, cameraExposure(exposureTex));
+        vec3 display = cameraDisplayColor(hdr, scratchTex, px, res,
+                                         cameraExposure(exposureTex), cameraWhiteBalanceScale(exposureTex));
         #ifdef CAMERA_VIEWFINDER
-            display = drawCameraViewfinder(display, vec2(px) + 0.5, res);
+            display = drawCameraViewfinder(display, vec2(px) + 0.5, res, exposureTex);
         #endif
     #endif
 

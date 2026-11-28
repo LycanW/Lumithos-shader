@@ -3,9 +3,7 @@
 
 #include "/lib/CameraOutput.glsl"
 
-uniform sampler2D cameraHistogramTex;
-
-vec3 drawCameraViewfinder(vec3 color, vec2 pixel, ivec2 res) {
+vec3 drawCameraViewfinder(vec3 color, vec2 pixel, ivec2 res, sampler2D exposureTex) {
     #if defined(AUTO_EXPOSURE) && (CAMERA_METERING_MODE == 1 || CAMERA_METERING_MODE == 2)
         vec2 radii = cameraMeterRadii(res);
         float edge = abs(length((pixel - vec2(res) * 0.5) / radii) - 1.0) * min(radii.x, radii.y);
@@ -25,7 +23,7 @@ vec3 drawCameraViewfinder(vec3 color, vec2 pixel, ivec2 res) {
     if (any(lessThan(plot, vec2(0.0))) || any(greaterThanEqual(plot, vec2(1.0)))) return color;
 
     int bin = int(plot.x * float(CAMERA_VIEWFINDER_BINS));
-    float height = texelFetch(cameraHistogramTex, ivec2(bin, 0), 0).r;
+    float height = texelFetch(exposureTex, ivec2(bin, CAMERA_VIEWFINDER_HISTOGRAM_ROW), 0).r;
     float baseline = 1.0 / (size.y - 2.0 * padding);
     return mix(color, vec3(0.93), plot.y < height ? 0.9 : (plot.y < baseline ? 0.35 : 0.0));
 }

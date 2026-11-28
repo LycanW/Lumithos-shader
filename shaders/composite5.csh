@@ -3,8 +3,14 @@
 // Single-workgroup pass:
 // 1) Downsample Bloom L3 -> L4 (resolution-independent stride loop).
 // 2) Meter scene HDR and update temporal auto exposure.
+// 3) Estimate the illuminant for auto white balance.
 #include "/lib/Bloom.glsl"
 #include "/lib/Camera.glsl"
+
+#if defined(CAMERA_AUTO_WHITE_BALANCE) && DEBUG_VIEW == 0
+    #define COMPUTE_AUTO_WHITE_BALANCE
+    #include "/lib/CameraWhiteBalance.glsl"
+#endif
 
 layout(local_size_x = 16, local_size_y = 16) in;
 const ivec3 workGroups = ivec3(1, 1, 1);
@@ -13,10 +19,53 @@ uniform sampler2D scratchTex;
 layout(rgba16f) uniform writeonly image2D scratchImg;
 layout(rgba32f) uniform image2D exposureImg;
 
-#ifdef AUTO_EXPOSURE
-#if CAMERA_METERING_MODE != 0
+#if (defined(AUTO_EXPOSURE) && CAMERA_METERING_MODE != 0) || defined(COMPUTE_AUTO_WHITE_BALANCE)
 uniform sampler2D taaHistTex;
 #endif
+
+#ifdef COMPUTE_AUTO_WHITE_BALANCE
+const uint WHITE_BALANCE_SAMPLE_COUNT = gl_WorkGroupSize.x * gl_WorkGroupSize.y;
+shared vec4 whiteBalanceSamples[WHITE_BALANCE_SAMPLE_COUNT];
+
+vec4 whiteBalanceSample(ivec2 px, ivec2 currOff) {
+    float depth = texelFetch(depthtex1, px, 0).r;
+    if (depth >= 0.999999 || texelFetch(depthtex0, px, 0).r < depth - 1e-7) return vec4(0.0);
+
+    GBufferMat material = readGBuffer(px);
+    if (material.isHand || material.emission > 0.0 || isLabPBRMetal(material.f0) || material.roughness < 0.50) {
+        return vec4(0.0);
+    }
+    float neutral = smoothstep(0.72, 0.91, minOf(material.albedo) / max(maxOf(material.albedo), 1e-5));
+    if (neutral == 0.0 || luma(material.albedo) < 0.035) return vec4(0.0);
+
+    vec3 hdr = max(texelFetch(taaHistTex, px + currOff, 0).rgb, vec3(0.0));
+    if (any(isnan(hdr)) || any(isinf(hdr))) return vec4(0.0);
+    float brightnessWeight = smoothstep(0.002, 0.04, luma(hdr));
+    if (brightnessWeight == 0.0) return vec4(0.0);
+
+    // Divide out known surface color and reject highly saturated light sources.
+    vec3 light = hdr / material.albedo;
+    float saturationWeight = smoothstep(0.08, 0.30, minOf(light) / maxOf(light));
+    float weight = neutral * brightnessWeight * saturationWeight;
+    return vec4(light * (weight / luma(light)), weight);
+}
+
+vec4 adaptWhiteBalance(vec4 evidence, vec4 previous) {
+    vec3 target = vec3(1.0);
+    if (evidence.w > 4.0) {
+        vec3 illuminant = evidence.rgb / evidence.w;
+        vec3 gains = clamp(CAMERA_D65_CONE / (CAMERA_RGB_TO_CONE * illuminant), vec3(0.5), vec3(2.0));
+        target = mix(target, gains, smoothstep(4.0, 16.0, evidence.w));
+    }
+
+    vec3 prior = frameCounter > 2 && previous.w > 0.0 ? previous.rgb : vec3(1.0);
+    // A one-second time constant also smooths the return to neutral.
+    float blend = 1.0 - exp(-clamp(frameTime, 0.0, 0.1));
+    return vec4(mix(prior, target, blend), 1.0);
+}
+#endif
+
+#ifdef AUTO_EXPOSURE
 #if CAMERA_METERING_MODE == 3
 const int CAMERA_METER_ZONES_PER_AXIS = 4;
 const int CAMERA_METER_ZONE_SAMPLES_PER_AXIS = 8;
@@ -77,6 +126,10 @@ void main() {
     ivec2 lid = ivec2(gl_LocalInvocationID.xy);
     uint tid = gl_LocalInvocationIndex;
 
+    #if (defined(AUTO_EXPOSURE) && CAMERA_METERING_MODE != 0) || defined(COMPUTE_AUTO_WHITE_BALANCE)
+        ivec2 currOff = ivec2((frameCounter & 1) * res.x, 0);
+    #endif
+
     #if defined(BLOOM_ENABLED) || (defined(AUTO_EXPOSURE) && CAMERA_METERING_MODE == 0)
         BloomRect l3 = getBloomRect(3, false, res);
     #endif
@@ -97,10 +150,6 @@ void main() {
             meterHistogram[bin] = 0u;
         }
         barrier();
-
-        #if CAMERA_METERING_MODE != 0
-            ivec2 currOff = ivec2((frameCounter & 1) * res.x, 0);
-        #endif
 
         #if CAMERA_METERING_MODE == 3
             const int gridSize = CAMERA_METER_ZONES_PER_AXIS * CAMERA_METER_ZONE_SAMPLES_PER_AXIS;
@@ -165,6 +214,20 @@ void main() {
             float previousExposure = imageLoad(exposureImg, ivec2(0)).g;
             vec4 exposure = adaptCameraExposure(meteredLogLuminance, previousExposure);
             imageStore(exposureImg, ivec2(0), exposure);
+        }
+    #endif
+
+    #ifdef COMPUTE_AUTO_WHITE_BALANCE
+        ivec2 px = ivec2((vec2(lid) + 0.5) * vec2(res) / vec2(gl_WorkGroupSize.xy));
+        whiteBalanceSamples[tid] = whiteBalanceSample(px, currOff);
+        barrier();
+        if (tid == 0u) {
+            vec4 evidence = vec4(0.0);
+            for (uint i = 0u; i < WHITE_BALANCE_SAMPLE_COUNT; ++i) {
+                evidence += whiteBalanceSamples[i];
+            }
+            vec4 previous = imageLoad(exposureImg, CAMERA_WHITE_BALANCE_TEXEL);
+            imageStore(exposureImg, CAMERA_WHITE_BALANCE_TEXEL, adaptWhiteBalance(evidence, previous));
         }
     #endif
 }

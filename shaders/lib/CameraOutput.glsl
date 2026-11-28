@@ -3,9 +3,11 @@
 
 #include "/lib/Bloom.glsl"
 #include "/lib/Camera.glsl"
+#include "/lib/CameraWhiteBalance.glsl"
 #include "/lib/Tonemap.glsl"
 
 const uint CAMERA_VIEWFINDER_BINS = 64u;
+const int CAMERA_VIEWFINDER_HISTOGRAM_ROW = 1;
 
 vec3 sampleCameraHdr(sampler2D sceneTex, ivec2 px, ivec2 res) {
     ivec2 currOff = ivec2((frameCounter & 1) * res.x, 0);
@@ -28,11 +30,11 @@ vec3 sampleBloomBilinear(sampler2D bloomTex, ivec2 px, ivec2 res) {
     return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 }
 
-vec3 cameraDisplayColor(vec3 hdr, sampler2D bloomTex, ivec2 px, ivec2 res, float exposure) {
+vec3 cameraDisplayColor(vec3 hdr, sampler2D bloomTex, ivec2 px, ivec2 res, float exposure, vec3 whiteBalanceScale) {
     #ifdef BLOOM_ENABLED
         hdr = mix(hdr, sampleBloomBilinear(bloomTex, px, res), float(BLOOM_STRENGTH));
     #endif
-    return linearToSrgb(applyTonemap(hdr * exposure));
+    return linearToSrgb(applyTonemap(applyCameraWhiteBalance(hdr, whiteBalanceScale) * exposure));
 }
 
 #endif
