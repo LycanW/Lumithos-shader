@@ -13,6 +13,10 @@ layout(rgba16f) uniform writeonly image2D colorimg0;
 layout(rgba16f) uniform writeonly image2D colorimg5;
 layout(rgba32f) uniform writeonly image2D prevGuideImg;
 
+uniform ivec2 eyeBrightness;
+uniform ivec2 eyeBrightnessSmooth;
+uniform sampler2D handSkyIrradianceTex;
+
 vec3 evalHeldLightColor(int itemId) {
     if (itemId == 20001) return vec3(0.38, 0.94, 1.00); // Soul fire
     if (itemId == 20002) return vec3(0.74, 0.95, 1.00); // Sea lantern / beacon
@@ -275,6 +279,14 @@ void main() {
     }
 
     GBufferMat mat = readGBuffer(px);
+    vec2 handLightmap = vec2(0.0);
+    if (mat.isHand) {
+        // Iris supplies block and sky light at the player's eyes in 0..240.
+        // A channel that has reached zero must not carry light from the previous location.
+        handLightmap = saturate(vec2(eyeBrightnessSmooth) / 240.0)
+                     * vec2(greaterThan(eyeBrightness, ivec2(0)));
+    }
+    float skyLight = mat.isHand ? handLightmap.y : mat.skyLight;
     // gbuffers_hand does NOT apply TAA jitter, so never subtract taaJitter when unprojecting hand pixels!
     vec3 viewPos;
     if (mat.isHand) {
@@ -309,7 +321,7 @@ void main() {
     float NdotL = max(dot(mat.shadeNormal, lightDir), 0.0);
     float geoHorizon = smoothstep(0.0, 0.08, dot(mat.geoNormal, lightDir));
     vec3 shadowVis = vec3(0.0);
-    if (NdotL > 0.0 && geoHorizon > 0.0 && maxOf(directCol) > 1e-4) {
+    if (NdotL > 0.0 && geoHorizon > 0.0 && maxOf(directCol) > 1e-4 && (!mat.isHand || skyLight > 0.0)) {
         vec2 shNoise = stbn2D(px, mat.isHand ? 0 : frameCounter, 7u);
         float shadowCoverage = 0.0;
         float waterPath = 0.0;
@@ -322,7 +334,7 @@ void main() {
             ssSun = traceSunScreenSpaceShadow(viewPos, viewGeoN, viewLightDir, shadowCoverage, mat.isHand, mat.isFoliage, shNoise.y);
         }
 
-        vec3 distantVis = vec3(smoothstep(0.42, 0.94, mat.skyLight) * ssSun);
+        vec3 distantVis = vec3(smoothstep(0.42, 0.94, skyLight) * ssSun);
         vec3 nearVis    = smVis * ssSun;
         shadowVis = mix(distantVis, nearVis, shadowCoverage) * geoHorizon;
 
@@ -374,10 +386,20 @@ void main() {
         if (!isMetal) kD_direct = 1.0 - F;
     }
 
-    // The first-person hand uses sky ambient for indirect light.
+    // Sky irradiance is measured at the camera. The lightmap supplies a local
+    // ambient estimate for placed block lights.
     vec3 diffuseGI;
     if (mat.isHand) {
-        diffuseGI = evalSky(mat.shadeNormal, false) * (0.15 + 0.85 * mat.skyLight);
+        const float handBlockLightScale = 0.25;
+        diffuseGI = vec3(handBlockLightScale * handLightmap.x * handLightmap.x);
+        if (skyLight > 0.0) {
+            vec3 normal = mat.shadeNormal;
+            vec3 axisWeight = normal * normal;
+            ivec3 face = ivec3(0, 2, 4) + ivec3(lessThan(normal, vec3(0.0)));
+            diffuseGI += axisWeight.x * texelFetch(handSkyIrradianceTex, ivec2(face.x, 0), 0).rgb
+                       + axisWeight.y * texelFetch(handSkyIrradianceTex, ivec2(face.y, 0), 0).rgb
+                       + axisWeight.z * texelFetch(handSkyIrradianceTex, ivec2(face.z, 0), 0).rgb;
+        }
     } else {
         diffuseGI = max(texelFetch(colortex3, px, 0).rgb, vec3(0.0));
     }
