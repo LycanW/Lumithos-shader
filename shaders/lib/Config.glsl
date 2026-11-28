@@ -41,12 +41,21 @@
 #define SPECULAR_REFLECTIONS
 #define ENTITY_REFLECTIONS
 #define TAA_ENABLED
+
+// Camera exposure controls. EXPOSURE is saved as a multiplier and displayed in stops.
+#define AUTO_EXPOSURE
+#define CAMERA_METERING_MODE 3 // [0 2 1 3]
+//#define CAMERA_VIEWFINDER
+#define EXPOSURE 1.0 // [0.0625 0.125 0.25 0.5 0.75 1.0 1.25 1.5 2.0 3.0 4.0 8.0 16.0 22.627417 32.0 64.0]
+#define CAMERA_MIN_EV -4.0 // [-8.0 -7.0 -6.0 -5.0 -4.0 -3.0 -2.0 -1.0 0.0]
+#define CAMERA_MAX_EV 4.5 // [0.0 1.0 2.0 3.0 3.5 4.0 4.5 5.0 5.5 6.0 7.0 8.0]
+#define CAMERA_ADAPT_BRIGHT 0.45 // [0.15 0.25 0.35 0.45 0.6 0.8 1.0 1.5 2.0 3.0]
+#define CAMERA_ADAPT_DARK 1.25 // [0.25 0.5 0.75 1.0 1.25 1.5 2.0 2.5 3.0 4.0]
+
 // Tonemapper: 0 = AgX (Default), 1 = GT7, 2 = PBR Neutral, 3 = ACES
 #define TONEMAP_MODE 0 // [0 1 2 3]
-#define AUTO_EXPOSURE
 #define BLOOM_ENABLED
 #define BLOOM_STRENGTH 0.06 // [0.02 0.04 0.06 0.08 0.12 0.16]
-#define EXPOSURE 1.0 // [0.25 0.5 0.75 1.0 1.25 1.5 2.0 3.0]
 #define WATER_PARALLAX
 #define WATER_CAUSTICS
 #define WAVE_STRENGTH 1.0 // [0.25 0.5 0.75 1.0 1.25 1.5 2.0]
